@@ -63,6 +63,63 @@ module.exports = {
 			feedbacks: []
 		});
 
+		presets.push({
+			type: 'button',
+			category: 'Router: Controls',
+			name: 'Clock Master & Status',
+			style: {
+				text: 'CLOCK MASTER\\n$(dante:clock_grandmaster)\\n$(dante:clock_status)',
+				size: 'auto',
+				color: colorWhite,
+				bgcolor: colorDarkGrey,
+			},
+			steps: [
+				{
+					down: [
+						{
+							actionId: 'refresh',
+							options: {}
+						}
+					],
+					up: []
+				}
+			],
+			feedbacks: [
+				{
+					feedbackId: 'clock_master_status',
+					options: { condition: 'locked' },
+					style: {
+						bgcolor: colorGreen,
+						color: colorWhite
+					}
+				},
+				{
+					feedbackId: 'clock_master_status',
+					options: { condition: 'syncing' },
+					style: {
+						bgcolor: colorOrange,
+						color: colorBlack
+					}
+				},
+				{
+					feedbackId: 'clock_master_status',
+					options: { condition: 'lost_sync' },
+					style: {
+						bgcolor: colorRed,
+						color: colorWhite
+					}
+				},
+				{
+					feedbackId: 'clock_master_status',
+					options: { condition: 'multiple_masters' },
+					style: {
+						bgcolor: colorRed,
+						color: colorWhite
+					}
+				}
+			]
+		});
+
 		// Dynamic Destination Presets
 		for (const [ip, device] of Object.entries(self.devicesData)) {
 			if (!device?.rx) continue;

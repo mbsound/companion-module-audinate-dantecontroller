@@ -29,6 +29,13 @@ class danteInstance extends InstanceBase {
 
 		this.devicesData = {};
 		this.selectedDestination = null;
+		this.clockMasterData = {
+			masterName: 'Searching...',
+			masterIp: 'None',
+			masterUuid: 'None',
+			status: 'Searching...',
+			state: 'unknown'
+		};
 	}
 
 	async destroy() {
@@ -62,7 +69,11 @@ class danteInstance extends InstanceBase {
 	
 		this.updateStatus(InstanceStatus.Connecting);
 
-		this.initConnection();this.initActions();
+		this.initConnection();
+		this.initActions();
+		this.initFeedbacks();
+		this.initVariables();
+		this.initPresets();
 	}
 }
 

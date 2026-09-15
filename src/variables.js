@@ -5,6 +5,10 @@ module.exports = {
 		let variables = [];
 		
 		variables.push({variableId: 'devices', name: 'Dante Devices'});
+		variables.push({variableId: 'clock_grandmaster', name: 'Dante Clock Grandmaster Device'});
+		variables.push({variableId: 'clock_status', name: 'Dante Clock Status'});
+		variables.push({variableId: 'clock_grandmaster_ip', name: 'Dante Clock Grandmaster IP'});
+		variables.push({variableId: 'clock_grandmaster_uuid', name: 'Dante Clock Grandmaster UUID'});
 		variables.push({variableId: 'selected_destination_device', name: 'Selected Destination Device'});
 		variables.push({variableId: 'selected_destination_channel', name: 'Selected Destination Channel'});
 		variables.push({variableId: 'selected_destination_source', name: 'Source Routed to Selected Destination'});
@@ -23,6 +27,8 @@ module.exports = {
 			variables.push({variableId: device.name + '_output_levels', name: 'Output levels of ' + device.name});
 			variables.push({variableId: device.name + '_model_name', name: 'Model name of ' + device.name});
 			variables.push({variableId: device.name + '_product_version', name: 'Product version of ' + device.name});
+			variables.push({variableId: device.name + '_clock_role', name: 'Clock role of ' + device.name});
+			variables.push({variableId: device.name + '_clock_synced', name: 'Clock sync status of ' + device.name});
 		}
 			
 		self.setVariableDefinitions(variables);
@@ -33,7 +39,7 @@ module.exports = {
 		const variableValues = {devices:[]};
 
 		if(!(variableTypes?.length > 0)) {
-		  variableTypes = ['ip', 'rx', 'tx', 'rx_names', 'tx_names', 'sr', 'latency', 'encoding', 'output_levels', 'manf'];
+		  variableTypes = ['ip', 'rx', 'tx', 'rx_names', 'tx_names', 'sr', 'latency', 'encoding', 'output_levels', 'manf', 'clock'];
 		}
 
 		for ([ip, device] of Object.entries(self.devicesData)) { 
@@ -83,12 +89,34 @@ module.exports = {
 								let versionString = device.productVersionString ? device.productVersionString : ''+device.productVersionMajor+'.'+ device.productVersionMinor+ '.'+ device.productVersionPatch;
 								variableValues[deviceName + '_product_version'] = versionString;
 								break;
+
+							case 'clock':
+								if (device.clock) {
+									const role = device.clock.isMaster ? 'Leader' : (device.clock.state === 8 ? 'Follower' : (device.clock.state === 1 ? 'Faulty' : 'Unknown'));
+									const sync = device.clock.servo === 3 ? 'Locked' : (device.clock.servo === 2 ? 'Syncing' : 'Lost Sync');
+									variableValues[deviceName + '_clock_role'] = role;
+									variableValues[deviceName + '_clock_synced'] = sync;
+								}
+								break;
 								
 						}
 					}
 				}
 			}
 		}
+
+		// Update global clock grandmaster variables
+		const clockData = self.clockMasterData || {
+			masterName: 'Searching...',
+			masterIp: 'None',
+			masterUuid: 'None',
+			status: 'Searching...',
+			state: 'unknown'
+		};
+		variableValues['clock_grandmaster'] = clockData.masterName || 'Searching...';
+		variableValues['clock_status'] = clockData.status || 'Searching...';
+		variableValues['clock_grandmaster_ip'] = clockData.masterIp || 'None';
+		variableValues['clock_grandmaster_uuid'] = clockData.masterUuid || 'None';
 
 		// Update selected destination variables
 		if (self.selectedDestination) {

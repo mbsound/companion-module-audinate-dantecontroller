@@ -47,8 +47,25 @@ Upstream only reported a binary "OK or nothing" status. This fork decodes Dante'
 * 🔴 **Clock Domain / Latency Mismatch**: Alerts on PTP sync or latency mismatches (`26`, `27`).
 * 🔴 **Format Mismatch**: Alerts on sample rate or bit depth conflicts (`16`, `17`).
 
+### Clock Master Detection & Clock Status Feedback
+This fork introduces native ConMon PTP clock inspection (`MESSAGE_TYPE_CLOCKING_STATUS` / opcode `0x0020`), tracking the network's active Clock Master (Grandmaster) and lock state in real time:
+* **Dedicated Feedback Button**: Built-in preset button displaying:
+  ```
+  CLOCK MASTER
+  $(dante:clock_grandmaster)
+  $(dante:clock_status)
+  ```
+  Dynamically changes color via the `clock_master_status` feedback:
+  * **Green**: Master and slaves locked in sync (`Locked`).
+  * **Orange/Amber**: Network settling or clock acquiring sync (`Syncing`).
+  * **Red**: PTP sync lost or clock domain fault (`Lost Sync`).
+  * **Red**: Multiple conflicting Grandmasters detected on the network (`Multiple Masters Detected!`).
+* **Global Clock Variables**: `$(dante:clock_grandmaster)`, `$(dante:clock_status)`, `$(dante:clock_grandmaster_ip)`, and `$(dante:clock_grandmaster_uuid)`.
+* **Per-Device Clock Tracking**: `$(dante:<deviceName>_clock_role)` (Leader/Follower/Faulty) and `$(dante:<deviceName>_clock_synced)` (Locked/Syncing/Lost Sync).
+
 ### Auto-Generated Dynamic Presets
 Upstream had an empty preset file. This fork dynamically generates Companion buttons based on discovered devices:
+* **Clock Master & Status**: One-touch diagnostic button with real-time name, status tally, and automatic color alerting.
 * **Destinations Grid**: One-touch buttons for every discovered Rx channel with integrated selection and status feedback.
 * **Sources Grid**: One-touch buttons for every discovered Tx channel that route to the active destination with live route tally.
 * **Master Controls**: Pre-configured buttons for "Clear Route" and "Refresh Dante".

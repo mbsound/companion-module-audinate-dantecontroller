@@ -372,6 +372,49 @@ module.exports = {
 			isVisible: (options, deviceIp) => options.destinationDevice == deviceIp
 		});
 	}
+
+	feedbacks['clock_master_status'] = {
+		type: 'boolean',
+		name: 'Clock Master & Sync Status',
+		description: 'Change button style based on Dante Grandmaster health and network clock lock state',
+		defaultStyle: {
+			color: combineRgb(255, 255, 255),
+			bgcolor: combineRgb(0, 180, 0),
+		},
+		options: [
+			{
+				type: 'dropdown',
+				label: 'Clock Condition',
+				id: 'condition',
+				default: 'locked',
+				choices: [
+					{ id: 'locked', label: 'Clock Locked / In Sync (Normal)' },
+					{ id: 'syncing', label: 'Syncing / Acquiring' },
+					{ id: 'lost_sync', label: 'Lost Sync / Clock Fault' },
+					{ id: 'multiple_masters', label: 'Multiple Grandmasters Detected' },
+					{ id: 'any_error', label: 'Any Error / Warning (Syncing, Lost Sync, Multiple Masters)' }
+				]
+			}
+		],
+		callback: (feedback) => {
+			const state = self.clockMasterData?.state || 'unknown';
+			switch (feedback.options.condition) {
+				case 'locked':
+					return state === 'locked';
+				case 'syncing':
+					return state === 'syncing';
+				case 'lost_sync':
+					return state === 'error';
+				case 'multiple_masters':
+					return state === 'multiple_masters';
+				case 'any_error':
+					return state === 'error' || state === 'multiple_masters' || state === 'syncing';
+				default:
+					return false;
+			}
+		}
+	};
+
 		self.setFeedbackDefinitions(feedbacks);
 	}
 }

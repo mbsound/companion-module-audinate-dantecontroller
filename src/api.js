@@ -985,10 +985,58 @@ module.exports = {
 					this.getSettings(deviceIp);
 					break;
 				}
+
+				case DANTE_CONST.COMMANDS.MESSAGE_TYPE_CLOCKING_STATUS :
+				case DANTE_CONST.COMMANDS.MESSAGE_TYPE_CLOCKING_CONTROL : {
+					if (payload.length >= 16) {
+						const clockState = bufferToInt(payload, 8);
+						const servoState = bufferToInt(payload, 10);
+						const clockSource = bufferToInt(payload, 12);
+						const isPreferred = payload[14] !== 0;
+						const clockStratum = payload[15];
+						const drift = payload.length >= 20 ? bufferToInt(payload, 16, 4) : 0;
+
+						let uuid = '';
+						let masterUuid = '';
+						let grandmasterUuid = '';
+
+						if (payload.length >= 28) {
+							uuid = payload.slice(20, 28).toString('hex');
+						}
+						if (payload.length >= 36) {
+							masterUuid = payload.slice(28, 36).toString('hex');
+						}
+						if (payload.length >= 44) {
+							grandmasterUuid = payload.slice(36, 44).toString('hex');
+						}
+
+						const isMaster = (clockState === 5) || (Boolean(uuid) && Boolean(grandmasterUuid) && uuid === grandmasterUuid);
+
+						currDevice.clock = {
+							state: clockState,
+							servo: servoState,
+							clockSource: clockSource,
+							isPreferred: isPreferred,
+							stratum: clockStratum,
+							drift: drift,
+							uuid: uuid,
+							masterUuid: masterUuid,
+							grandmasterUuid: grandmasterUuid,
+							isMaster: isMaster
+						};
+
+						updateFlags.push('clock');
+					}
+					break;
+				}
 					
 			}
 			
-			this.devicesData = merge(this.devicesData, deviceData); this.checkVariables(deviceIp);
+			this.devicesData = merge(this.devicesData, deviceData);
+			if (updateFlags.includes('clock')) {
+				this.updateClockMasterStatus();
+			}
+			this.checkVariables(deviceIp);
 			this.checkVariables(deviceIp, ...updateFlags);
 
 			for (const flag of updateFlags) {
@@ -1497,6 +1545,21 @@ module.exports = {
 		this.sendCommand(commandBuffer, ipaddress, 'SETTINGS');
 	},
 
+	getClocking(ipaddress) {
+		const commandBuffer = this.makeSettingCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_CLOCKING_CONTROL, Buffer.concat([
+			Buffer.from('00000064', 'hex'),
+			Buffer.alloc(8)
+		]));
+		this.sendCommand(commandBuffer, ipaddress, 'SETTINGS');
+	},
+
+	refreshClock(deviceIp) {
+		const ipArray = deviceIp ? [deviceIp] : Object.keys(this.devicesData);
+		for (const ip of ipArray) {
+			this.getClocking(ip);
+		}
+	},
+
 	getSettingsPort (ipaddress) { 
 		const commandBuffer = Buffer.concat([
 			intToBuffer(0x1200, 2),
@@ -1587,7 +1650,10 @@ module.exports = {
 		self.stopInterval();
 	
 		if (self.config.interval > 0) {
-			self.INTERVAL = setInterval(self.getMdnsServices.bind(self), self.config.interval);
+			self.INTERVAL = setInterval(() => {
+				self.getMdnsServices();
+				self.refreshSettings();
+			}, self.config.interval);
 			self.log('info', 'Starting Update Interval: Every ' + self.config.interval + 'ms');
 		}
 	},
@@ -1604,19 +1670,20 @@ module.exports = {
 	
 	refreshSettings: function(deviceIp) {
 		const ipArray = deviceIp ? [deviceIp] : Object.keys(this.devicesData);
-		for (ip of ipArray) {
+		for (const ip of ipArray) {
 			this.getSampleRate(ip);
 			this.getPullup(ip);
 			this.getEncoding(ip);
 			this.getLevel(ip);
 			this.getVersion(ip);
 			this.getManfVersion(ip);
+			this.getClocking(ip);
 		}
 	},
 	
 	refreshArc:  function(deviceIp) {
 		const ipArray = deviceIp ? [deviceIp] : Object.keys(this.devicesData);
-		for (ip of ipArray) {
+		for (const ip of ipArray) {
 			this.getDeviceName(ip);
 			this.getSettings(ip);
 			this.getRxChannels(ip);
@@ -1632,7 +1699,7 @@ module.exports = {
 		}
 		
 		let questions = []; 
-		for (service of DANTE_CONST.SERVICES_ARRAY) {
+		for (const service of DANTE_CONST.SERVICES_ARRAY) {
 			questions.push ({
 				name: service, 
 				type: 'PTR',
@@ -1644,6 +1711,106 @@ module.exports = {
 		});
 
 	},
+
+	updateClockMasterStatus: function() {
+		let grandmasters = [];
+		let anySyncing = false;
+		let anyLostSync = false;
+		let totalDevicesWithClock = 0;
+
+		for (const [ip, dev] of Object.entries(this.devicesData)) {
+			if (!dev.clock) continue;
+			totalDevicesWithClock++;
+			if (dev.clock.isMaster) {
+				if (!grandmasters.includes(ip)) {
+					grandmasters.push(ip);
+				}
+			}
+			if (dev.clock.servo === 2) anySyncing = true;
+			if (dev.clock.servo === 1 || dev.clock.servo === 0 || dev.clock.state === 1) anyLostSync = true;
+		}
+
+		// If no device directly flagged as master, check if devices report a common grandmasterUuid
+		if (grandmasters.length === 0) {
+			const gmUuids = {};
+			for (const [ip, dev] of Object.entries(this.devicesData)) {
+				const gm = dev.clock?.grandmasterUuid;
+				if (gm && gm !== '0000000000000000') {
+					gmUuids[gm] = (gmUuids[gm] || 0) + 1;
+				}
+			}
+			for (const gm of Object.keys(gmUuids)) {
+				for (const [ip, dev] of Object.entries(this.devicesData)) {
+					if (dev.clock?.uuid && dev.clock.uuid === gm) {
+						if (!grandmasters.includes(ip)) grandmasters.push(ip);
+					}
+				}
+			}
+		}
+
+		let masterDeviceName = 'Searching...';
+		let masterDeviceIp = 'None';
+		let masterUuid = 'None';
+		let statusText = 'Searching...';
+		let statusState = 'unknown';
+
+		if (grandmasters.length > 1) {
+			const distinctUuids = new Set(grandmasters.map((ip) => this.devicesData[ip]?.clock?.uuid).filter(Boolean));
+			if (distinctUuids.size > 1) {
+				masterDeviceName = grandmasters.map((ip) => this.devicesData[ip]?.name || ip).join(', ');
+				statusText = 'Multiple Masters Detected!';
+				statusState = 'multiple_masters';
+			} else {
+				const primaryGm = grandmasters[0];
+				masterDeviceName = this.devicesData[primaryGm]?.name || primaryGm;
+				masterDeviceIp = primaryGm;
+				masterUuid = this.devicesData[primaryGm]?.clock?.uuid || 'None';
+			}
+		}
+
+		if (statusState !== 'multiple_masters') {
+			if (grandmasters.length === 1) {
+				const gmIp = grandmasters[0];
+				const gmDev = this.devicesData[gmIp];
+				masterDeviceName = gmDev?.name || gmIp;
+				masterDeviceIp = gmIp;
+				masterUuid = gmDev?.clock?.uuid || 'None';
+
+				if (anyLostSync) {
+					statusText = 'Lost Sync';
+					statusState = 'error';
+				} else if (anySyncing || gmDev.clock?.servo === 2) {
+					statusText = 'Syncing';
+					statusState = 'syncing';
+				} else {
+					statusText = 'Locked';
+					statusState = 'locked';
+				}
+			} else if (totalDevicesWithClock > 0) {
+				if (anyLostSync) {
+					statusText = 'Sync Fault';
+					statusState = 'error';
+				} else if (anySyncing) {
+					statusText = 'Syncing';
+					statusState = 'syncing';
+				} else {
+					statusText = 'Searching...';
+					statusState = 'unknown';
+				}
+			}
+		}
+
+		this.clockMasterData = {
+			masterName: masterDeviceName,
+			masterIp: masterDeviceIp,
+			masterUuid: masterUuid,
+			status: statusText,
+			state: statusState
+		};
+
+		this.checkVariables(undefined, 'clock');
+		this.checkFeedbacks('clock_master_status');
+	},
 	
 	updateData: function (bytes) {
 		let self = this;
@@ -1654,5 +1821,6 @@ module.exports = {
 		this.checkVariables();
 		this.initFeedbacks();
 		this.checkFeedbacks();
+		this.initPresets();
 	},
 }

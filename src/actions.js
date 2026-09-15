@@ -757,6 +757,14 @@ module.exports = {
 				self.refreshArc();
 			}
 		};
+
+		actions.refreshClock = {
+			name: 'Refresh Clock Status',
+			options : [],
+			callback : async function (action, context) {
+				self.refreshClock();
+			}
+		};
 				
 		
 		self.setActionDefinitions(actions);
