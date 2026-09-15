@@ -28,18 +28,18 @@ This module interfaces directly with Dante hardware on your local network using 
 
 This fork introduces significant architectural upgrades, professional matrix routing workflows, multi-channel batch operations, protocol hardening, and granular diagnostic feedbacks that were absent in the upstream release:
 
-### 🎛️ VideoHub-Style Matrix Routing (Source → Selected Destination)
+### VideoHub-Style Matrix Routing (Source → Selected Destination)
 * **Dedicated Selection Workflow**:
   * **`Select Destination`**: Select an Rx channel on any device as the active destination. The selected button automatically highlights **Orange** (`selected_destination` feedback).
   * **`Route Source to Selected Destination`**: Press any Tx source button to route that channel immediately to the active destination.
   * **`Clear Route on Selected Destination`**: Instantly disconnect the active destination route.
   * **Dynamic Source Feedback**: Source buttons dynamically highlight **Green** (`source_routed_to_selected_destination`) if they are currently feeding the selected destination.
 
-### ⚡ Multi-Channel Batch Routing (Single UDP Datagram)
+### Multi-Channel Batch Routing (Single UDP Datagram)
 * **`Batch Route Channels`**: Routes a range of sequential channels (e.g., 1–8 to 1–8, or 1–16 to 1–16) in a **single UDP packet** using Dante's native array message buffers (`_dgcp_array_msg_buffer_init`). Eliminates switch congestion, packet drops, and audio pops caused by firing multiple sequential single-channel requests.
 * **`Batch Clear Channels`**: Cleanly unroutes a block of sequential channels in a single command.
 
-### 🩺 Granular Diagnostics & Subscription Health Feedback
+### Granular Diagnostics & Subscription Health Feedback
 Upstream only reported a binary "OK or nothing" status. This fork decodes Dante's internal status codes into visual, actionable operator feedbacks (`subscription_status`):
 * 🟢 **Connected / OK**: Active, healthy stream (Unicast Dynamic `9`, Multicast Static `10`, or Manual AES67 `14`).
 * 🟡 **In Progress / Resolving**: Searching for or negotiating with the transmitter (`1`, `8`).
@@ -47,13 +47,13 @@ Upstream only reported a binary "OK or nothing" status. This fork decodes Dante'
 * 🔴 **Clock Domain / Latency Mismatch**: Alerts on PTP sync or latency mismatches (`26`, `27`).
 * 🔴 **Format Mismatch**: Alerts on sample rate or bit depth conflicts (`16`, `17`).
 
-### 🚀 Auto-Generated Dynamic Presets
+### Auto-Generated Dynamic Presets
 Upstream had an empty preset file. This fork dynamically generates Companion buttons based on discovered devices:
 * **Destinations Grid**: One-touch buttons for every discovered Rx channel with integrated selection and status feedback.
 * **Sources Grid**: One-touch buttons for every discovered Tx channel that route to the active destination with live route tally.
 * **Master Controls**: Pre-configured buttons for "Clear Route" and "Refresh Dante".
 
-### 🛡️ Protocol Hardening & Bug Fixes
+### Protocol Hardening & Bug Fixes
 * **Dynamic String Offsets**: Replaced fragile, static byte offsets with dynamic string pool serializers that follow Dante's 10-byte DGCP header format (`_arcp_204_rx_sub_req_alloc_str`).
 * **Clean Unsubscription Framing**: Replaced hardcoded packet capture dumps (`005c006d`) in `clearCrosspoint` with standard zeroed string offset framing (`tx_chan_offset = 0`, `tx_device_offset = 0`).
 * **Crash Fixes**: Resolved upstream `ReferenceError` bugs (e.g., unhandled `DestinationDevice` casing and `destinationDeviceIP` reference errors).
