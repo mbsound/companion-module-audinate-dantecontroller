@@ -29,7 +29,8 @@ module.exports = {
 			callback: (feedback) => {
 				let opt = feedback.options;
 				if (opt.destinationDevice && self.devicesData[opt.destinationDevice]?.rx && opt.sourceDevice) {
-					let destinationChannel = self.devicesData[opt.destinationDevice].rx[opt['destinationChannel_'+opt.destinationDevice]];
+					const destChanId = opt['destinationChannel_' + opt.destinationDevice];
+					let destinationChannel = self.devicesData[opt.destinationDevice].rx[destChanId] || self.findRxChannelByName(opt.destinationDevice, destChanId);
 					const selectedSourceChannel = opt['sourceChannel_'+opt.sourceDevice];
 					const sourceChannel = self.devicesData[opt.sourceDevice]?.tx?.[selectedSourceChannel] || self.findTxChannelByName(opt.sourceDevice, selectedSourceChannel);
 					const normalizeName = (name) => String(name ?? '').trim().toLowerCase();
@@ -190,7 +191,12 @@ module.exports = {
 			const devMatch = (self.selectedDestination.device === opt.destinationDevice ||
 				self.findDeviceIpByName(self.selectedDestination.device) === opt.destinationDevice ||
 				self.devicesData[opt.destinationDevice]?.name === self.selectedDestination.device);
-			const chanMatch = String(self.selectedDestination.channel) === String(targetChannel);
+			const destIp = self.findDeviceIpByName(opt.destinationDevice) || opt.destinationDevice;
+			const targetRx = self.devicesData[destIp]?.rx?.[targetChannel] || self.findRxChannelByName(destIp, targetChannel);
+			const selRx = self.devicesData[destIp]?.rx?.[self.selectedDestination.channel] || self.findRxChannelByName(destIp, self.selectedDestination.channel);
+			const chanMatch = String(self.selectedDestination.channel) === String(targetChannel) ||
+				(Boolean(targetRx) && Boolean(selRx) && targetRx === selRx) ||
+				(Boolean(targetRx) && (targetRx.name === self.selectedDestination.channel || targetRx.friendlyName === self.selectedDestination.channel));
 			return devMatch && chanMatch;
 		}
 	};

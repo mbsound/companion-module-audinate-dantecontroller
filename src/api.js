@@ -19,23 +19,25 @@ const intToBuffer = (number, bytes = 2) => {
 	if (bytes < 1 || bytes > 8) {
 		return;
 	}
+	const safeNumber = typeof number === 'bigint' ? number : (parseInt(number, 10) || 0);
     let intBuffer = Buffer.alloc(bytes);
 	switch (bytes) {
 		case 1:
-			intBuffer.writeInt8(number);
+			intBuffer.writeInt8(Number(safeNumber));
 			break;
 		case 2:
 		case 3:
-			intBuffer.writeUInt16BE(number, bytes - 2);
+			intBuffer.writeUInt16BE(Number(safeNumber), bytes - 2);
 			break;
 		case 4:
 		case 5:
 		case 6:
 		case 7:
-			intBuffer.writeUint32BE(number, bytes - 4);
+			intBuffer.writeUint32BE(Number(safeNumber), bytes - 4);
 			break;
 		case 8:
-			intBuffer.writeBigUInt64BE(number);
+			intBuffer.writeBigUInt64BE(BigInt(safeNumber));
+			break;
 	}
 			
     return intBuffer;
@@ -61,10 +63,14 @@ const incrementBE = (buffer) => {
 };
 
 const parseString = (buffer, startIndex) => {
-  const end = buffer.indexOf(0x00, startIndex);
-  if (buffer.length > startIndex) {
-	return buffer.toString('utf8', startIndex, end);
+  if (!startIndex || startIndex <= 0 || startIndex >= buffer.length) {
+    return '';
   }
+  const end = buffer.indexOf(0x00, startIndex);
+  if (end === -1) {
+    return buffer.toString('utf8', startIndex);
+  }
+  return buffer.toString('utf8', startIndex, end);
 };
 
 
@@ -214,7 +220,7 @@ const parseRxChannels = (reply) => {
 		returnChannel.sourceDevice = parseString(reply, sourceDeviceIndex);
 		returnChannel.channelStatus = bufferToInt(infoBuffer, channelStatusOffset);
 		returnChannel.subscriptionStatus = bufferToInt(infoBuffer, subscriptionStatusOffset);
-		returnChannel.sampleRate = reply.readUInt32BE(sampleRateIndex); 
+		returnChannel.sampleRate = (sampleRateIndex > 0 && sampleRateIndex + 4 <= reply.length) ? reply.readUInt32BE(sampleRateIndex) : undefined; 
 	}
     return deviceInfo;
 }
@@ -245,12 +251,12 @@ const parseDeviceSettings = (reply) => {
 		switch (infoCode) {
 			case 0x8020:
 			// Sample rate
-				deviceInfo.sr = reply.readUInt32BE(valueIndex);
+				deviceInfo.sr = (valueIndex + 4 <= reply.length) ? reply.readUInt32BE(valueIndex) : undefined;
 				break;
 				
 			case 0x8301 : 
 			// Latency 
-				deviceInfo.latency = reply.readUInt32BE(valueIndex)/1000000; 
+				deviceInfo.latency = (valueIndex + 4 <= reply.length) ? reply.readUInt32BE(valueIndex)/1000000 : undefined; 
 				break;
 		}
 	}
@@ -272,8 +278,15 @@ module.exports = {
 	},
 
 	findDeviceIpByName: function (deviceName) {
+		if (!deviceName) return;
 		for (const [ip, device] of Object.entries(this.devicesData)) {
 			if (device?.name == deviceName) {
+				return ip;
+			}
+		}
+		const lowerName = String(deviceName).trim().toLowerCase();
+		for (const [ip, device] of Object.entries(this.devicesData)) {
+			if (device?.name && device.name.trim().toLowerCase() === lowerName) {
 				return ip;
 			}
 		}
@@ -289,7 +302,12 @@ module.exports = {
 			return;
 		}
 		for (const [channelNumber, channel] of Object.entries(device.tx)) {
-			if (!isNaN(channelNumber) && (channel?.name == channelName || channel?.friendlyName == channelName)) {
+			if (!isNaN(channelNumber) && (
+				channel?.name == channelName ||
+				channel?.friendlyName == channelName ||
+				channelNumber == channelName ||
+				channel?.number == channelName
+			)) {
 				return channel;
 			}
 		}
@@ -305,14 +323,19 @@ module.exports = {
 			return;
 		}
 		for (const [channelNumber, channel] of Object.entries(device.rx)) {
-			if (!isNaN(channelNumber) && (channel?.name == channelName)) {
+			if (!isNaN(channelNumber) && (
+				channel?.name == channelName ||
+				channel?.friendlyName == channelName ||
+				channelNumber == channelName ||
+				channel?.number == channelName
+			)) {
 				return channel;
 			}
 		}
 	},
 	
 	checkConnections() {
-		for (service of ['ARC', 'CMC', 'SETTINGS', 'HEARTBEAT']) {
+		for (const service of ['ARC', 'CMC', 'SETTINGS', 'HEARTBEAT']) {
 			if (!this.activeConnections[service]) {
 				if (this.CONNECTED) {
 					this.CONNECTED = false;
@@ -334,10 +357,21 @@ module.exports = {
 		this.counter = Buffer.from('0000', 'hex');
 
 		this.debug = this.config.verbose;
-		this.timeout = this.config.timeoutInterval;
+		this.timeout = parseInt(this.config.timeoutInterval, 10) || 0;
 		this.activeConnections = {};
 		self.updateStatus(InstanceStatus.Connecting);
 		
+		// close existing sockets and mdns if reconfiguring
+		if (this.sockets) {
+			for (const socket of Object.values(this.sockets)) {
+				try { socket.close(); } catch (e) {}
+			}
+		}
+		if (this.mdns) {
+			try { this.mdns.destroy(); } catch (e) {}
+			this.mdns = null;
+		}
+
 		// create data object
 		self.devicesData = {};
 		
@@ -696,7 +730,7 @@ module.exports = {
 					deviceData[deviceIp] = parseDeviceName(reply);
 					let currDevice = deviceData[deviceIp];
 
-					if (this.devicesData?.[deviceIp].name != currDevice.name) {
+					if (this.devicesData[deviceIp]?.name != currDevice.name) {
 						this.updateDeviceChoice(deviceIp, currDevice.name);
 						updateFlags.push('name');
 					}
@@ -1580,7 +1614,7 @@ module.exports = {
 	
 	
 	dante_discovery: function(response, rinfo) { 
-		for (type of ['answers', 'additionals']) {
+		for (const type of ['answers', 'additionals']) {
 			response[type]?.forEach((answer) => {
 				const name = answer.name;
 				// get devices and services names and port
@@ -1593,7 +1627,7 @@ module.exports = {
 					}); 
 				} else if (answer.type == 'SRV') {
 					// register services and port
-					for ([id, danteService] of Object.entries(DANTE_CONST.SERVICES)) { 
+					for (const [id, danteService] of Object.entries(DANTE_CONST.SERVICES)) { 
 						const dotIndex = name.indexOf('.');
 						const deviceName = name.slice(0, dotIndex);
 						const serviceName = name.slice(dotIndex + 1);
@@ -1730,15 +1764,16 @@ module.exports = {
 			if (dev.clock.servo === 1 || dev.clock.servo === 0 || dev.clock.state === 1) anyLostSync = true;
 		}
 
+		const gmUuids = {};
+		for (const [ip, dev] of Object.entries(this.devicesData)) {
+			const gm = dev.clock?.grandmasterUuid;
+			if (gm && gm !== '0000000000000000') {
+				gmUuids[gm] = (gmUuids[gm] || 0) + 1;
+			}
+		}
+
 		// If no device directly flagged as master, check if devices report a common grandmasterUuid
 		if (grandmasters.length === 0) {
-			const gmUuids = {};
-			for (const [ip, dev] of Object.entries(this.devicesData)) {
-				const gm = dev.clock?.grandmasterUuid;
-				if (gm && gm !== '0000000000000000') {
-					gmUuids[gm] = (gmUuids[gm] || 0) + 1;
-				}
-			}
 			for (const gm of Object.keys(gmUuids)) {
 				for (const [ip, dev] of Object.entries(this.devicesData)) {
 					if (dev.clock?.uuid && dev.clock.uuid === gm) {
@@ -1787,7 +1822,26 @@ module.exports = {
 					statusState = 'locked';
 				}
 			} else if (totalDevicesWithClock > 0) {
-				if (anyLostSync) {
+				const reportedGmUuids = Object.keys(gmUuids);
+				if (reportedGmUuids.length === 1) {
+					const gmUuid = reportedGmUuids[0];
+					masterDeviceName = `Clock (${gmUuid.slice(-8).toUpperCase()})`;
+					masterUuid = gmUuid;
+					if (anyLostSync) {
+						statusText = 'Lost Sync';
+						statusState = 'error';
+					} else if (anySyncing) {
+						statusText = 'Syncing';
+						statusState = 'syncing';
+					} else {
+						statusText = 'Locked';
+						statusState = 'locked';
+					}
+				} else if (reportedGmUuids.length > 1) {
+					masterDeviceName = reportedGmUuids.map((u) => u.slice(-8).toUpperCase()).join(', ');
+					statusText = 'Multiple Masters Detected!';
+					statusState = 'multiple_masters';
+				} else if (anyLostSync) {
 					statusText = 'Sync Fault';
 					statusState = 'error';
 				} else if (anySyncing) {

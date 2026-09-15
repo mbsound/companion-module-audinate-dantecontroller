@@ -42,7 +42,7 @@ module.exports = {
 		  variableTypes = ['ip', 'rx', 'tx', 'rx_names', 'tx_names', 'sr', 'latency', 'encoding', 'output_levels', 'manf', 'clock'];
 		}
 
-		for ([ip, device] of Object.entries(self.devicesData)) { 
+		for (const [ip, device] of Object.entries(self.devicesData)) { 
 			let deviceName = device?.name;
 			if (deviceName) {
 				variableValues.devices.push(deviceName);

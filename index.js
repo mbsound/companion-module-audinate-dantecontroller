@@ -39,18 +39,34 @@ class danteInstance extends InstanceBase {
 	}
 
 	async destroy() {
-		let self = this;
-
-		if (self.INTERVAL) {
-			clearInterval(self.INTERVAL);
-			self.INTERVAL = null;
+		if (this.INTERVAL) {
+			clearInterval(this.INTERVAL);
+			this.INTERVAL = null;
 		}
-		for (const ip of Object.keys(self.devicesData)) {
-			this.destroyDevice(ip);
+
+		if (this.devicesData) {
+			for (const dev of Object.values(this.devicesData)) {
+				if (dev?.timeoutArray?.[0]) {
+					clearTimeout(dev.timeoutArray[0]);
+				}
+			}
+			this.devicesData = {};
 		}
 		
-		for (const socket of Object.values(self.sockets)) {
-			socket.close();
+		if (this.sockets) {
+			for (const socket of Object.values(this.sockets)) {
+				try {
+					socket.close();
+				} catch (e) {}
+			}
+			this.sockets = {};
+		}
+
+		if (this.mdns) {
+			try {
+				this.mdns.destroy();
+			} catch (e) {}
+			this.mdns = null;
 		}
 	}
 

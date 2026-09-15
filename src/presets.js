@@ -20,7 +20,7 @@ module.exports = {
 			category: 'Router: Controls',
 			name: 'Clear Selected Route',
 			style: {
-				text: 'CLEAR\\nROUTE',
+				text: 'CLEAR\nROUTE',
 				size: '14',
 				color: colorWhite,
 				bgcolor: colorDarkGrey,
@@ -44,7 +44,7 @@ module.exports = {
 			category: 'Router: Controls',
 			name: 'Refresh Network Devices',
 			style: {
-				text: 'REFRESH\\nDANTE',
+				text: 'REFRESH\nDANTE',
 				size: '14',
 				color: colorWhite,
 				bgcolor: colorDarkGrey,
@@ -68,7 +68,7 @@ module.exports = {
 			category: 'Router: Controls',
 			name: 'Clock Master & Status',
 			style: {
-				text: 'CLOCK MASTER\\n$(dante:clock_grandmaster)\\n$(dante:clock_status)',
+				text: 'CLOCK MASTER\n$(dante:clock_grandmaster)\n$(dante:clock_status)',
 				size: 'auto',
 				color: colorWhite,
 				bgcolor: colorDarkGrey,
