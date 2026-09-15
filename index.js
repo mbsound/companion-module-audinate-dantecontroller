@@ -28,6 +28,7 @@ class danteInstance extends InstanceBase {
 		this.CONNECTED = false; //used for friendly notifying of the user that we have not received data yet
 
 		this.devicesData = {};
+		this.selectedDestination = null;
 	}
 
 	async destroy() {

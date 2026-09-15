@@ -163,6 +163,229 @@ module.exports = {
 			}
 			actions.clearCrosspointDropDown.options.push(nameOption);
 		}
+
+		actions.selectDestinationDropDown = {
+			name: 'Select Destination (drop down menu)',
+			options: [
+				{
+					type: 'dropdown',
+					label: 'Destination Device',
+					id: 'destinationDevice',
+					choices: self.devicesChoices
+				}
+			],
+			callback: async function (action) {
+				const opt = action.options;
+				const channel = opt['destinationChannel_' + opt.destinationDevice];
+				self.selectDestination(opt.destinationDevice, channel);
+			}
+		};
+		for (const [ip, device] of Object.entries(self.devicesData)) {
+			let nameOption = {
+				type: 'dropdown',
+				label: 'Destination channel',
+				id: 'destinationChannel_' + ip,
+				choices: this.rxChannelsChoices[device.name],
+				isVisibleData: ip,
+				isVisible: (options, deviceIp) => options.destinationDevice == deviceIp
+			};
+			actions.selectDestinationDropDown.options.push(nameOption);
+		}
+
+		actions.selectDestination = {
+			name: 'Select Destination (manual / variables)',
+			options: [
+				{
+					type: 'textinput',
+					label: 'Destination Device',
+					tooltip: 'Device Name or IP Address',
+					id: 'destinationDevice',
+					default: '',
+					useVariables: true
+				},
+				{
+					type: 'textinput',
+					label: 'Destination Channel',
+					tooltip: 'Channel Name or Number',
+					id: 'destinationChannel',
+					default: '1',
+					useVariables: true
+				}
+			],
+			callback: async function (action, context) {
+				const opt = action.options;
+				const device = await context.parseVariablesInString(opt.destinationDevice);
+				const channel = await context.parseVariablesInString(opt.destinationChannel);
+				self.selectDestination(device, channel);
+			}
+		};
+
+		actions.routeSourceToSelectedDestinationDropDown = {
+			name: 'Route Source to Selected Destination (drop down menu)',
+			options: [
+				{
+					type: 'dropdown',
+					label: 'Source Device',
+					id: 'sourceDevice',
+					choices: self.devicesChoices
+				}
+			],
+			callback: async function (action) {
+				const opt = action.options;
+				const sourceChannelNumber = opt['sourceChannel_' + opt.sourceDevice];
+				const sourceChannel = self.devicesData[opt.sourceDevice]?.tx?.[sourceChannelNumber] || self.findTxChannelByName(opt.sourceDevice, sourceChannelNumber);
+				const sourceChannelName = self.getChannelSubscriptionName(sourceChannel) || sourceChannelNumber;
+				self.routeSourceToSelectedDestination(self.devicesData[opt.sourceDevice]?.name || opt.sourceDevice, sourceChannelName);
+			}
+		};
+		for (const [ip, device] of Object.entries(self.devicesData)) {
+			let nameOption = {
+				type: 'dropdown',
+				label: 'Source channel',
+				id: 'sourceChannel_' + ip,
+				choices: this.txChannelsChoices[device.name],
+				isVisibleData: ip,
+				isVisible: (options, deviceIp) => options.sourceDevice == deviceIp
+			};
+			actions.routeSourceToSelectedDestinationDropDown.options.push(nameOption);
+		}
+
+		actions.routeSourceToSelectedDestination = {
+			name: 'Route Source to Selected Destination (manual / variables)',
+			options: [
+				{
+					type: 'textinput',
+					label: 'Source Device Name',
+					id: 'sourceDeviceName',
+					default: '',
+					useVariables: true
+				},
+				{
+					type: 'textinput',
+					label: 'Source Channel Name or Number',
+					id: 'sourceChannelName',
+					default: '1',
+					useVariables: true
+				}
+			],
+			callback: async function (action, context) {
+				const opt = action.options;
+				const sourceDevice = await context.parseVariablesInString(opt.sourceDeviceName);
+				const sourceChannel = await context.parseVariablesInString(opt.sourceChannelName);
+				self.routeSourceToSelectedDestination(sourceDevice, sourceChannel);
+			}
+		};
+
+		actions.clearSelectedDestination = {
+			name: 'Clear Route on Selected Destination',
+			options: [],
+			callback: async function () {
+				self.clearSelectedDestination();
+			}
+		};
+
+		actions.batchRoute = {
+			name: 'Batch Route Channels (1-to-1 sequential)',
+			options: [
+				{
+					type: 'textinput',
+					label: 'Destination Device (Name or IP)',
+					id: 'destinationDevice',
+					default: '',
+					useVariables: true
+				},
+				{
+					type: 'number',
+					label: 'Start Destination Channel Number',
+					id: 'startDestChannel',
+					default: 1,
+					min: 1,
+					max: 512
+				},
+				{
+					type: 'textinput',
+					label: 'Source Device Name',
+					id: 'sourceDeviceName',
+					default: '',
+					useVariables: true
+				},
+				{
+					type: 'number',
+					label: 'Start Source Channel Number',
+					id: 'startSourceChannel',
+					default: 1,
+					min: 1,
+					max: 512
+				},
+				{
+					type: 'number',
+					label: 'Number of Channels to Route',
+					id: 'count',
+					default: 8,
+					min: 1,
+					max: 64
+				}
+			],
+			callback: async function (action, context) {
+				const opt = action.options;
+				const destDev = await context.parseVariablesInString(opt.destinationDevice);
+				const srcDev = await context.parseVariablesInString(opt.sourceDeviceName);
+				const startDest = parseInt(opt.startDestChannel, 10);
+				const startSrc = parseInt(opt.startSourceChannel, 10);
+				const count = parseInt(opt.count, 10);
+
+				const routes = [];
+				for (let i = 0; i < count; i++) {
+					routes.push({
+						destinationChannel: startDest + i,
+						sourceDeviceName: srcDev,
+						sourceChannelName: String(startSrc + i)
+					});
+				}
+				self.makeBatchCrosspoint(destDev, routes);
+			}
+		};
+
+		actions.batchClear = {
+			name: 'Batch Clear Channels',
+			options: [
+				{
+					type: 'textinput',
+					label: 'Destination Device (Name or IP)',
+					id: 'destinationDevice',
+					default: '',
+					useVariables: true
+				},
+				{
+					type: 'number',
+					label: 'Start Destination Channel Number',
+					id: 'startDestChannel',
+					default: 1,
+					min: 1,
+					max: 512
+				},
+				{
+					type: 'number',
+					label: 'Number of Channels to Clear',
+					id: 'count',
+					default: 8,
+					min: 1,
+					max: 64
+				}
+			],
+			callback: async function (action, context) {
+				const opt = action.options;
+				const destDev = await context.parseVariablesInString(opt.destinationDevice);
+				const startDest = parseInt(opt.startDestChannel, 10);
+				const count = parseInt(opt.count, 10);
+
+				const channels = [];
+				for (let i = 0; i < count; i++) {
+					channels.push(startDest + i);
+				}
+				self.clearBatchCrosspoint(destDev, channels);
+			}
+		};
 		
 		actions.setDeviceName = {
 			name: 'Set Device name',

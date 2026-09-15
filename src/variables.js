@@ -5,6 +5,10 @@ module.exports = {
 		let variables = [];
 		
 		variables.push({variableId: 'devices', name: 'Dante Devices'});
+		variables.push({variableId: 'selected_destination_device', name: 'Selected Destination Device'});
+		variables.push({variableId: 'selected_destination_channel', name: 'Selected Destination Channel'});
+		variables.push({variableId: 'selected_destination_source', name: 'Source Routed to Selected Destination'});
+		variables.push({variableId: 'selected_destination_status', name: 'Subscription Status of Selected Destination'});
 		
 		for (const [ip, device] of Object.entries(self.devicesData)) {
 			variables.push({variableId: device.name + '_ip', name: 'Ip address of ' + device.name});
@@ -85,6 +89,37 @@ module.exports = {
 				}
 			}
 		}
+
+		// Update selected destination variables
+		if (self.selectedDestination) {
+			const selDev = self.selectedDestination.device;
+			const selChan = self.selectedDestination.channel;
+			const { Regex } = require('@companion-module/base');
+			const IP = RegExp(Regex.IP.slice(1, -1));
+			const destIp = IP.test(selDev) ? selDev : self.findDeviceIpByName(selDev);
+			const devName = self.devicesData[destIp]?.name || selDev;
+			const rxChan = self.findRxChannelByName(destIp, selChan) ?? self.devicesData[destIp]?.rx?.[selChan];
+			const chanName = rxChan?.friendlyName || rxChan?.name || selChan;
+
+			variableValues['selected_destination_device'] = devName;
+			variableValues['selected_destination_channel'] = chanName;
+
+			if (rxChan?.sourceDevice && rxChan?.sourceChannel) {
+				variableValues['selected_destination_source'] = `${rxChan.sourceDevice} / ${rxChan.sourceChannel}`;
+			} else {
+				variableValues['selected_destination_source'] = 'Unrouted';
+			}
+
+			const { DANTE_CONST } = require('./const');
+			const statusCode = rxChan?.subscriptionStatus ?? 0;
+			variableValues['selected_destination_status'] = DANTE_CONST.SUBSCRIPTION_STATUS_NAMES?.[statusCode] || `Status ${statusCode}`;
+		} else {
+			variableValues['selected_destination_device'] = 'None';
+			variableValues['selected_destination_channel'] = 'None';
+			variableValues['selected_destination_source'] = 'None';
+			variableValues['selected_destination_status'] = 'None';
+		}
+
 		try {
 			self.setVariableValues(variableValues);
 		}

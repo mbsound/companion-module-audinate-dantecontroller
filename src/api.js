@@ -1199,47 +1199,43 @@ module.exports = {
 
 
     makeCrosspoint(destinationDevice, sourceChannelName, sourceDeviceName, destinationChannel) {
-	
 		const sourceChannel = this.findTxChannelByName(sourceDeviceName, sourceChannelName);
 		const sourceSubscriptionName = this.getChannelSubscriptionName(sourceChannel) || sourceChannelName;
         const sourceChannelNameBuffer = Buffer.from(sourceSubscriptionName, "ascii");
         const sourceDeviceNameBuffer = Buffer.from(sourceDeviceName, "ascii");
 
 		const destinationChannelNumber = this.findRxChannelByName(destinationDevice, destinationChannel)?.number ?? destinationChannel
-	
+
 		// Check if destinationDevice is an IP or a name
 		const IP = RegExp(Regex.IP.slice(1,-1));
 		const ipaddress = IP.test(destinationDevice) ? destinationDevice : this.findDeviceIpByName(destinationDevice);
 		
 		if (!ipaddress) {
-			this.log('error', "Can't find " + DestinationDevice + " IP address");
+			this.log('error', "Can't find " + destinationDevice + " IP address");
 			return;
 		}
-			
+
+		// 10 bytes DGCP header + 2 bytes count + 6 bytes entry + 4 bytes padding = 22
+		const chanNameOffset = 22;
+		const devNameOffset = chanNameOffset + sourceChannelNameBuffer.length + 1;
 
         let commandArguments = Buffer.concat([
-			Buffer.from('0001', 'hex'), 						// unknown code
-			intToBuffer (destinationChannelNumber),				// destination channel number
-			intToBuffer (22), 									// Byte index of source channel Name
-			intToBuffer(22 + sourceChannelNameBuffer.length+1), // Byte index of source device name
-			Buffer.alloc(4),									// padding until byte index of source channel name
+			intToBuffer(1, 2), 									// 1 channel subscription
+			intToBuffer(destinationChannelNumber, 2),			// destination channel number
+			intToBuffer(chanNameOffset, 2), 					// Byte index of source channel Name
+			intToBuffer(devNameOffset, 2), 						// Byte index of source device name
+			Buffer.alloc(4),									// 4-byte padding
 			sourceChannelNameBuffer,							// source channel Name
-			Buffer.alloc(1),									// separator (\x00)
+			Buffer.alloc(1),									// null terminator (\x00)
 			sourceDeviceNameBuffer,								// source device name
+			Buffer.alloc(1)										// null terminator (\x00)
         ]);
 
         const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
-
         this.sendCommand(commandBuffer, ipaddress);
-		
-		// get updated routing for feedback
-//		this.getRxChannels(ipaddress);
     },
-	
-	
 
     clearCrosspoint(destinationDevice, destinationChannel) {
-		
 		const destinationChannelNumber = this.findRxChannelByName(destinationDevice, destinationChannel)?.number ?? destinationChannel
 
 		// Check if destinationDevice is an IP or a name
@@ -1251,17 +1247,107 @@ module.exports = {
 			return;
 		}
 		
+		// Clean Audinate unsubscription: tx_chan offset = 0, tx_device offset = 0
         let commandArguments = Buffer.concat([
-            Buffer.from("0401", "hex"),
-            intToBuffer(destinationChannelNumber),
-            Buffer.from("005c006d", "hex"),
-            Buffer.alloc(1),
+            intToBuffer(1, 2), 									// 1 channel subscription
+            intToBuffer(destinationChannelNumber, 2),			// destination channel number
+            Buffer.from("00000000", "hex"),						// null string offsets (unsubscribes channel)
+            Buffer.alloc(4),									// 4-byte padding
         ]);
 
         const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
-
         this.sendCommand(commandBuffer, ipaddress);
     },
+
+	makeBatchCrosspoint(destinationDevice, routes) {
+		if (!Array.isArray(routes) || routes.length === 0) return;
+
+		const IP = RegExp(Regex.IP.slice(1,-1));
+		const ipaddress = IP.test(destinationDevice) ? destinationDevice : this.findDeviceIpByName(destinationDevice);
+		if (!ipaddress) {
+			this.log('error', "Can't find " + destinationDevice + " IP address");
+			return;
+		}
+
+		// DGCP header = 10 bytes, count = 2 bytes, each entry = 6 bytes
+		const entriesHeaderSize = 10 + 2 + (routes.length * 6);
+		// Add 4 bytes padding after entries table
+		let currentStringOffset = entriesHeaderSize + 4;
+
+		let entriesBuffers = [];
+		let stringPoolBuffers = [];
+
+		for (const route of routes) {
+			const rxNum = this.findRxChannelByName(destinationDevice, route.destinationChannel)?.number ?? route.destinationChannel;
+			const isUnsubscribe = !route.sourceDeviceName || !route.sourceChannelName;
+
+			if (isUnsubscribe) {
+				entriesBuffers.push(Buffer.concat([
+					intToBuffer(rxNum, 2),
+					Buffer.from("00000000", "hex")
+				]));
+			} else {
+				const txChan = this.findTxChannelByName(route.sourceDeviceName, route.sourceChannelName);
+				const subChanName = this.getChannelSubscriptionName(txChan) || route.sourceChannelName;
+				const chanBuf = Buffer.from(subChanName, "ascii");
+				const devBuf = Buffer.from(route.sourceDeviceName, "ascii");
+
+				const chanOffset = currentStringOffset;
+				currentStringOffset += chanBuf.length + 1;
+				const devOffset = currentStringOffset;
+				currentStringOffset += devBuf.length + 1;
+
+				entriesBuffers.push(Buffer.concat([
+					intToBuffer(rxNum, 2),
+					intToBuffer(chanOffset, 2),
+					intToBuffer(devOffset, 2)
+				]));
+
+				stringPoolBuffers.push(chanBuf, Buffer.alloc(1), devBuf, Buffer.alloc(1));
+			}
+		}
+
+		let commandArguments = Buffer.concat([
+			intToBuffer(routes.length, 2),
+			...entriesBuffers,
+			Buffer.alloc(4),
+			...stringPoolBuffers
+		]);
+
+		const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
+		this.sendCommand(commandBuffer, ipaddress);
+	},
+
+	clearBatchCrosspoint(destinationDevice, destinationChannels) {
+		if (!Array.isArray(destinationChannels) || destinationChannels.length === 0) return;
+		const routes = destinationChannels.map(ch => ({ destinationChannel: ch, sourceDeviceName: null, sourceChannelName: null }));
+		this.makeBatchCrosspoint(destinationDevice, routes);
+	},
+
+	selectDestination(device, channel) {
+		this.selectedDestination = {
+			device: device,
+			channel: channel,
+		};
+		this.checkFeedbacks('selected_destination', 'source_routed_to_selected_destination');
+		this.checkVariables();
+	},
+
+	routeSourceToSelectedDestination(sourceDevice, sourceChannel) {
+		if (!this.selectedDestination || !this.selectedDestination.device || !this.selectedDestination.channel) {
+			this.log('warn', 'No destination currently selected to route to');
+			return;
+		}
+		this.makeCrosspoint(this.selectedDestination.device, sourceChannel, sourceDevice, this.selectedDestination.channel);
+	},
+
+	clearSelectedDestination() {
+		if (!this.selectedDestination || !this.selectedDestination.device || !this.selectedDestination.channel) {
+			this.log('warn', 'No destination currently selected to clear');
+			return;
+		}
+		this.clearCrosspoint(this.selectedDestination.device, this.selectedDestination.channel);
+	},
 
 
 

@@ -2,6 +2,7 @@
 	"id": "audinate-dantecontroller",
 	"name": "audinate-dantecontroller",
 	"shortname": "audinate-dantecontroller",
+	"type": "connection",
 	"description": "Companion module for controlling Audinate Dante devices",
 	"version": "0.0.0",
 	"license": "MIT",
