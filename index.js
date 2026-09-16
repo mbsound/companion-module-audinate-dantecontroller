@@ -43,6 +43,10 @@ class danteInstance extends InstanceBase {
 			clearInterval(this.INTERVAL);
 			this.INTERVAL = null;
 		}
+		if (this.METERING_INTERVAL) {
+			clearInterval(this.METERING_INTERVAL);
+			this.METERING_INTERVAL = null;
+		}
 
 		if (this.devicesData) {
 			for (const dev of Object.values(this.devicesData)) {

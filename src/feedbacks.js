@@ -1,5 +1,6 @@
 const { combineRgb } = require('@companion-module/base');
-const { Regex } = require('@companion-module/base')
+const { Regex } = require('@companion-module/base');
+const { render1ChMeter, render4ChMeter, byteToDbfs } = require('./utils/meter-graphics');
 
 module.exports = {
 	initFeedbacks: function () {
@@ -418,6 +419,190 @@ module.exports = {
 				default:
 					return false;
 			}
+		}
+	};
+
+	feedbacks['metering_1ch'] = {
+		type: 'advanced',
+		name: 'Audio Meter (1-Channel)',
+		description: 'Displays a live audio meter bar and numeric peak dBFS readout for a single Dante channel',
+		options: [
+			{
+				type: 'dropdown',
+				label: 'Device',
+				id: 'device',
+				choices: self.devicesChoices,
+				default: self.devicesChoices?.[0]?.id || ''
+			},
+			{
+				type: 'dropdown',
+				label: 'Direction',
+				id: 'direction',
+				default: 'rx',
+				choices: [
+					{ id: 'rx', label: 'Receive (Rx / Inputs)' },
+					{ id: 'tx', label: 'Transmit (Tx / Outputs)' }
+				]
+			},
+			{
+				type: 'number',
+				label: 'Channel Number (1-512)',
+				id: 'channelNumber',
+				default: 1,
+				min: 1,
+				max: 512,
+				step: 1
+			},
+			{
+				type: 'dropdown',
+				label: 'Display Mode',
+				id: 'displayMode',
+				default: 'bar_text',
+				choices: [
+					{ id: 'bar_text', label: 'Meter Bar + dB Readout' },
+					{ id: 'bar_only', label: 'Meter Bar Only' },
+					{ id: 'text_only', label: 'Numeric dB Readout Only' }
+				]
+			}
+		],
+		subscribe: (feedback) => {
+			if (feedback.options?.device) {
+				self.subscribeMetering?.(feedback.options.device);
+			}
+		},
+		unsubscribe: (feedback) => {
+			if (feedback.options?.device) {
+				self.unsubscribeMetering?.(feedback.options.device);
+			}
+		},
+		callback: (feedback) => {
+			const opt = feedback.options;
+			if (!opt?.device) return {};
+			const dev = self.devicesData[opt.device];
+			const direction = opt.direction || 'rx';
+			const chNum = parseInt(opt.channelNumber, 10) || 1;
+
+			const chData = dev?.metering?.[direction]?.[chNum];
+			const peakByte = chData?.peak !== undefined ? chData.peak : 254;
+			const peakHoldByte = chData?.peakHold !== undefined ? chData.peakHold : 254;
+
+			const res = render1ChMeter({
+				peakByte,
+				peakHoldByte,
+				displayMode: opt.displayMode
+			});
+
+			let channelName = '';
+			if (dev) {
+				const chanObj = dev[direction]?.[chNum] || dev[direction]?.[chNum - 1];
+				channelName = chanObj?.friendlyName || chanObj?.name || `Ch ${chNum}`;
+			} else {
+				channelName = `Ch ${chNum}`;
+			}
+
+			let displayText = '';
+			if (opt.displayMode !== 'bar_only') {
+				displayText = `${channelName}\n${res.readoutText}`;
+			}
+
+			return {
+				imageBuffer: res.imageBuffer,
+				imageBufferEncoding: { pixelFormat: 'RGBA' },
+				imageBufferPosition: { x: 0, y: 0, width: 72, height: 72 },
+				text: displayText,
+				size: 10,
+				color: res.isClip ? combineRgb(255, 60, 60) : combineRgb(255, 255, 255),
+				alignment: 'right:center'
+			};
+		}
+	};
+
+	feedbacks['metering_4ch'] = {
+		type: 'advanced',
+		name: 'Audio Meter Bridge (4-Channel)',
+		description: 'Displays 4 side-by-side live audio meter bars on a single button',
+		options: [
+			{
+				type: 'dropdown',
+				label: 'Device',
+				id: 'device',
+				choices: self.devicesChoices,
+				default: self.devicesChoices?.[0]?.id || ''
+			},
+			{
+				type: 'dropdown',
+				label: 'Direction',
+				id: 'direction',
+				default: 'rx',
+				choices: [
+					{ id: 'rx', label: 'Receive (Rx / Inputs)' },
+					{ id: 'tx', label: 'Transmit (Tx / Outputs)' }
+				]
+			},
+			{
+				type: 'dropdown',
+				label: 'Channel Bank',
+				id: 'channelBank',
+				default: '1',
+				choices: [
+					{ id: '1', label: 'Channels 1 - 4' },
+					{ id: '5', label: 'Channels 5 - 8' },
+					{ id: '9', label: 'Channels 9 - 12' },
+					{ id: '13', label: 'Channels 13 - 16' },
+					{ id: '17', label: 'Channels 17 - 20' },
+					{ id: '21', label: 'Channels 21 - 24' },
+					{ id: '25', label: 'Channels 25 - 28' },
+					{ id: '29', label: 'Channels 29 - 32' },
+					{ id: '33', label: 'Channels 33 - 36' },
+					{ id: '37', label: 'Channels 37 - 40' },
+					{ id: '41', label: 'Channels 41 - 44' },
+					{ id: '45', label: 'Channels 45 - 48' },
+					{ id: '49', label: 'Channels 49 - 52' },
+					{ id: '53', label: 'Channels 53 - 56' },
+					{ id: '57', label: 'Channels 57 - 60' },
+					{ id: '61', label: 'Channels 61 - 64' }
+				]
+			}
+		],
+		subscribe: (feedback) => {
+			if (feedback.options?.device) {
+				self.subscribeMetering?.(feedback.options.device);
+			}
+		},
+		unsubscribe: (feedback) => {
+			if (feedback.options?.device) {
+				self.unsubscribeMetering?.(feedback.options.device);
+			}
+		},
+		callback: (feedback) => {
+			const opt = feedback.options;
+			if (!opt?.device) return {};
+			const dev = self.devicesData[opt.device];
+			const direction = opt.direction || 'rx';
+			const startCh = parseInt(opt.channelBank, 10) || 1;
+
+			const channelsData = [];
+			for (let i = 0; i < 4; i++) {
+				const chNum = startCh + i;
+				const chData = dev?.metering?.[direction]?.[chNum];
+				channelsData.push({
+					peakByte: chData?.peak !== undefined ? chData.peak : 254,
+					peakHoldByte: chData?.peakHold !== undefined ? chData.peakHold : 254
+				});
+			}
+
+			const res = render4ChMeter(channelsData);
+			const labelText = `${startCh}  ${startCh + 1}  ${startCh + 2}  ${startCh + 3}`;
+
+			return {
+				imageBuffer: res.imageBuffer,
+				imageBufferEncoding: { pixelFormat: 'RGBA' },
+				imageBufferPosition: { x: 0, y: 0, width: 72, height: 72 },
+				text: labelText,
+				size: 9,
+				color: combineRgb(200, 200, 200),
+				alignment: 'center:bottom'
+			};
 		}
 	};
 

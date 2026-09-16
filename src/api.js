@@ -380,6 +380,9 @@ module.exports = {
 		self.txChannelsChoices = {};
 		self.rxChannelsChoices = {};
 		self.txFriendlyNameRefreshCounter = 0;
+		self.meteringSubscriptions = {};
+		self.meteringNeedsFeedbackCheck = false;
+		self.meteringTickCounter = 0;
 
 		// get available Ips
 		const nets = networkInterfaces();
@@ -553,6 +556,23 @@ module.exports = {
 			heartbeatSocket.bind(DANTE_CONST.PORTS.HEARTBEAT);
 		}
 		
+		// create Dante Metering listener socket (port 8751)
+		try {
+			this.sockets.METERING = dgram.createSocket({type: "udp4", reuseAddr: true});
+			const meteringSocket = this.sockets.METERING;
+			meteringSocket.on("message", this.parseMeteringSocketReply.bind(this));
+			meteringSocket.on("error", (err) => {
+				self.log('debug', 'Metering socket (8751) notice: ' + err.message);
+			});
+			if (availableIps.includes(self.config.ip)) {
+				meteringSocket.bind(8751, self.config.ip);
+			} else {
+				meteringSocket.bind(8751);
+			}
+		} catch (err) {
+			self.log('debug', 'Metering socket creation optional: ' + err.message);
+		}
+
 		self.setupInterval(); 
 		
 		if (availableIps.includes(self.config.ip)) {
@@ -1061,6 +1081,12 @@ module.exports = {
 
 						updateFlags.push('clock');
 					}
+					break;
+				}
+
+				case DANTE_CONST.COMMANDS.MESSAGE_TYPE_METERING_STATUS :
+				case DANTE_CONST.COMMANDS.MESSAGE_TYPE_METERING_CONTROL : {
+					this.parseMeteringBody(payload.slice(4), deviceIp);
 					break;
 				}
 					
@@ -1594,6 +1620,163 @@ module.exports = {
 		}
 	},
 
+	requestMetering(ipaddress) {
+		const commandArguments = Buffer.concat([
+			Buffer.from('00000064', 'hex'),
+			Buffer.alloc(8)
+		]);
+		const commandBuffer = this.makeSettingCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_METERING_CONTROL, commandArguments);
+		this.sendCommand(commandBuffer, ipaddress, 'SETTINGS');
+	},
+
+	sendCmcSubscribe(ipaddress) {
+		const commandBuffer = Buffer.concat([
+			intToBuffer(0x1200, 2),
+			intToBuffer(26), // command size
+			this.counter,
+			intToBuffer(0x2000), // legacy subscribe opcode
+			intToBuffer(0x0001), // channel_type: 1 (METERING)
+			intToBuffer(0x0000),
+			intToBuffer(0x222f), // port 8751 (METERING_FIREWALL_PORT)
+			this.mac,
+			intToBuffer(0x0000)
+		]);
+		this.sendCommand(commandBuffer, ipaddress, 'CMC');
+		incrementBE(this.counter);
+	},
+
+	subscribeMetering(deviceIp) {
+		if (!deviceIp) return;
+		this.meteringSubscriptions = this.meteringSubscriptions || {};
+		this.meteringSubscriptions[deviceIp] = (this.meteringSubscriptions[deviceIp] || 0) + 1;
+		if (this.meteringSubscriptions[deviceIp] === 1) {
+			this.requestMetering(deviceIp);
+			this.sendCmcSubscribe(deviceIp);
+		}
+	},
+
+	unsubscribeMetering(deviceIp) {
+		if (!deviceIp || !this.meteringSubscriptions) return;
+		if (this.meteringSubscriptions[deviceIp] > 0) {
+			this.meteringSubscriptions[deviceIp]--;
+			if (this.meteringSubscriptions[deviceIp] <= 0) {
+				delete this.meteringSubscriptions[deviceIp];
+			}
+		}
+	},
+
+	parseMeteringSocketReply(reply, rinfo) {
+		const deviceIp = rinfo.address;
+		if (reply.length >= 24 && bufferToInt(reply, 0) === DANTE_CONST.PROTOCOL.SETTINGS) {
+			const payload = reply.slice(24);
+			this.parseMeteringBody(payload.slice(4), deviceIp);
+		} else {
+			this.parseMeteringBody(reply, deviceIp);
+		}
+	},
+
+	parseMeteringBody(body, deviceIp) {
+		if (!body || body.length < 3 || !deviceIp) return;
+
+		// Find the version byte (1, 2, or 3)
+		let offset = 0;
+		if (body[0] !== 1 && body[0] !== 2 && body[0] !== 3) {
+			if (body.length >= 7 && (body[4] === 1 || body[4] === 2 || body[4] === 3)) {
+				offset = 4;
+			} else {
+				return;
+			}
+		}
+
+		const version = body[offset];
+		let numTx = 0;
+		let numRx = 0;
+		let dataStart = 0;
+
+		if (version < 3) {
+			numTx = body[offset + 1];
+			numRx = body[offset + 2];
+			dataStart = offset + 3;
+		} else if (version === 3) {
+			if (body.length < offset + 6) return;
+			numTx = (body[offset + 2] << 8) | body[offset + 3];
+			numRx = (body[offset + 4] << 8) | body[offset + 5];
+			dataStart = offset + 6;
+		}
+
+		if (body.length < dataStart + numTx + numRx) {
+			return;
+		}
+
+		if (!this.devicesData[deviceIp]) {
+			this.devicesData[deviceIp] = {};
+		}
+		if (!this.devicesData[deviceIp].metering) {
+			this.devicesData[deviceIp].metering = { tx: {}, rx: {} };
+		}
+
+		const devM = this.devicesData[deviceIp].metering;
+		const now = Date.now();
+
+		for (let i = 0; i < numTx; i++) {
+			const chNum = i + 1;
+			const peak = body[dataStart + i];
+			const prev = devM.tx[chNum];
+			const prevHold = prev?.peakHold !== undefined ? prev.peakHold : 254;
+			const peakHold = peak < prevHold ? peak : prevHold;
+			devM.tx[chNum] = { peak, peakHold, updatedAt: now };
+		}
+
+		for (let j = 0; j < numRx; j++) {
+			const chNum = j + 1;
+			const peak = body[dataStart + numTx + j];
+			const prev = devM.rx[chNum];
+			const prevHold = prev?.peakHold !== undefined ? prev.peakHold : 254;
+			const peakHold = peak < prevHold ? peak : prevHold;
+			devM.rx[chNum] = { peak, peakHold, updatedAt: now };
+		}
+
+		this.meteringNeedsFeedbackCheck = true;
+	},
+
+	processMeteringTick() {
+		// 1. Refresh active metering subscriptions if any
+		const subscribedIps = Object.keys(this.meteringSubscriptions || {}).filter(
+			(ip) => this.meteringSubscriptions[ip] > 0
+		);
+
+		if (subscribedIps.length > 0) {
+			this.meteringTickCounter = (this.meteringTickCounter || 0) + 1;
+			// Send request every 200ms (every 2nd tick of 100ms)
+			if (this.meteringTickCounter % 2 === 0) {
+				for (const ip of subscribedIps) {
+					this.requestMetering(ip);
+					this.sendCmcSubscribe(ip);
+				}
+			}
+		}
+
+		// 2. Slowly decay peak hold for active channels
+		for (const dev of Object.values(this.devicesData || {})) {
+			if (dev?.metering) {
+				for (const dir of ['tx', 'rx']) {
+					for (const ch of Object.values(dev.metering[dir] || {})) {
+						if (ch.peakHold !== undefined && ch.peakHold < 254) {
+							ch.peakHold = Math.min(254, ch.peakHold + 2);
+							this.meteringNeedsFeedbackCheck = true;
+						}
+					}
+				}
+			}
+		}
+
+		// 3. Trigger throttled feedback updates
+		if (this.meteringNeedsFeedbackCheck) {
+			this.meteringNeedsFeedbackCheck = false;
+			this.checkFeedbacks('metering_1ch', 'metering_4ch');
+		}
+	},
+
 	getSettingsPort (ipaddress) { 
 		const commandBuffer = Buffer.concat([
 			intToBuffer(0x1200, 2),
@@ -1690,15 +1873,28 @@ module.exports = {
 			}, self.config.interval);
 			self.log('info', 'Starting Update Interval: Every ' + self.config.interval + 'ms');
 		}
+
+		if (self.METERING_INTERVAL !== null && self.METERING_INTERVAL !== undefined) {
+			clearInterval(self.METERING_INTERVAL);
+			self.METERING_INTERVAL = null;
+		}
+		self.METERING_INTERVAL = setInterval(() => {
+			self.processMeteringTick();
+		}, 100);
 	},
 	
 	stopInterval: function() {
 		let self = this;
 	
-		if (self.INTERVAL !== null) {
+		if (self.INTERVAL !== null && self.INTERVAL !== undefined) {
 			self.log('info', 'Stopping Update Interval.');
 			clearInterval(self.INTERVAL);
 			self.INTERVAL = null;
+		}
+
+		if (self.METERING_INTERVAL !== null && self.METERING_INTERVAL !== undefined) {
+			clearInterval(self.METERING_INTERVAL);
+			self.METERING_INTERVAL = null;
 		}
 	},
 	

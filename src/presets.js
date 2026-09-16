@@ -236,6 +236,54 @@ module.exports = {
 			}
 		}
 
+		// Audio Metering Presets
+		presets.push({
+			type: 'button',
+			category: 'Audio Metering',
+			name: '1-Channel Audio Meter',
+			style: {
+				text: 'METER\nCH 1',
+				size: '14',
+				color: colorWhite,
+				bgcolor: colorDarkGrey,
+			},
+			steps: [],
+			feedbacks: [
+				{
+					feedbackId: 'metering_1ch',
+					options: {
+						device: self.devicesChoices?.[0]?.id || '',
+						direction: 'rx',
+						channelNumber: 1,
+						displayMode: 'bar_text'
+					}
+				}
+			]
+		});
+
+		presets.push({
+			type: 'button',
+			category: 'Audio Metering',
+			name: '4-Channel Audio Meter Bridge (1-4)',
+			style: {
+				text: '',
+				size: '9',
+				color: colorWhite,
+				bgcolor: colorDarkGrey,
+			},
+			steps: [],
+			feedbacks: [
+				{
+					feedbackId: 'metering_4ch',
+					options: {
+						device: self.devicesChoices?.[0]?.id || '',
+						direction: 'rx',
+						channelBank: '1'
+					}
+				}
+			]
+		});
+
 		self.setPresetDefinitions(presets);
 	}
 }

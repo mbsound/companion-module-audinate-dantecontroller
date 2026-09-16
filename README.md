@@ -63,6 +63,20 @@ This fork introduces native ConMon PTP clock inspection (`MESSAGE_TYPE_CLOCKING_
 * **Global Clock Variables**: `$(dante:clock_grandmaster)`, `$(dante:clock_status)`, `$(dante:clock_grandmaster_ip)`, and `$(dante:clock_grandmaster_uuid)`.
 * **Per-Device Clock Tracking**: `$(dante:<deviceName>_clock_role)` (Leader/Follower/Faulty) and `$(dante:<deviceName>_clock_synced)` (Locked/Syncing/Lost Sync).
 
+### Real-Time Audio Metering Feedbacks (1-Channel & 4-Channel Bridge)
+This fork taps into Dante's native DSP peak metering telemetry (`MESSAGE_TYPE_METERING_STATUS` / opcode `0x00E0` and `MESSAGE_TYPE_METERING_CONTROL` / opcode `0x00E1`), decoding granular audio levels at ~0.5 dB resolution directly on Stream Deck keys:
+* **On-Demand Subscription Management**: Devices are only queried/subscribed when a meter feedback is placed on an active button; when the button is removed, the module automatically tears down the subscription to conserve network bandwidth.
+* **1-Channel Audio Meter (`metering_1ch`)**:
+  * Segmented vertical meter bar with color grading (Green $\to$ Amber $\to$ Orange $\to$ Red Clip).
+  * Real-time numeric peak readout in dBFS (e.g. `-14 dB`, `CLIP`, or `MUTE`) and channel label.
+  * Decay-mode peak hold indicator.
+  * Configurable display modes: Bar + dB Text, Bar Only, or Numeric Readout Only.
+* **4-Channel Audio Meter Bridge (`metering_4ch`)**:
+  * Renders 4 side-by-side vertical audio meters on a single button key.
+  * Bank selection (Channels 1–4, 5–8, 9–12, ..., 61–64) for Rx inputs or Tx outputs.
+  * Color-graded bars, peak hold ticks, and channel numbers.
+* **Built-in Presets**: Pre-configured buttons under the **Audio Metering** category for instant drag-and-drop deployment.
+
 ### Auto-Generated Dynamic Presets
 Upstream had an empty preset file. This fork dynamically generates Companion buttons based on discovered devices:
 * **Clock Master & Status**: One-touch diagnostic button with real-time name, status tally, and automatic color alerting.
