@@ -2,33 +2,33 @@ module.exports = {
 	initVariables: function () {
 		let self = this;
 
-		let variables = [];
+		let variables = {};
 		
-		variables.push({variableId: 'devices', name: 'Dante Devices'});
-		variables.push({variableId: 'clock_grandmaster', name: 'Dante Clock Grandmaster Device'});
-		variables.push({variableId: 'clock_status', name: 'Dante Clock Status'});
-		variables.push({variableId: 'clock_grandmaster_ip', name: 'Dante Clock Grandmaster IP'});
-		variables.push({variableId: 'clock_grandmaster_uuid', name: 'Dante Clock Grandmaster UUID'});
-		variables.push({variableId: 'selected_destination_device', name: 'Selected Destination Device'});
-		variables.push({variableId: 'selected_destination_channel', name: 'Selected Destination Channel'});
-		variables.push({variableId: 'selected_destination_source', name: 'Source Routed to Selected Destination'});
-		variables.push({variableId: 'selected_destination_status', name: 'Subscription Status of Selected Destination'});
+		variables['devices'] = { name: 'Dante Devices' };
+		variables['clock_grandmaster'] = { name: 'Dante Clock Grandmaster Device' };
+		variables['clock_status'] = { name: 'Dante Clock Status' };
+		variables['clock_grandmaster_ip'] = { name: 'Dante Clock Grandmaster IP' };
+		variables['clock_grandmaster_uuid'] = { name: 'Dante Clock Grandmaster UUID' };
+		variables['selected_destination_device'] = { name: 'Selected Destination Device' };
+		variables['selected_destination_channel'] = { name: 'Selected Destination Channel' };
+		variables['selected_destination_source'] = { name: 'Source Routed to Selected Destination' };
+		variables['selected_destination_status'] = { name: 'Subscription Status of Selected Destination' };
 		
 		for (const [ip, device] of Object.entries(self.devicesData)) {
-			variables.push({variableId: device.name + '_ip', name: 'Ip address of ' + device.name});
-			variables.push({variableId: device.name + '_tx', name: 'Number of outputs for ' + device.name});
-			variables.push({variableId: device.name + '_tx_names', name: 'Output names for ' + device.name});
-			variables.push({variableId: device.name + '_rx', name: 'Number of inputs for ' + device.name});
-			variables.push({variableId: device.name + '_rx_names', name: ' Input names for ' + device.name});
-			variables.push({variableId: device.name + '_sr', name: 'Sample rate of ' + device.name});
-			variables.push({variableId: device.name + '_pullup', name: 'Sample rate pullup of ' + device.name});
-			variables.push({variableId: device.name + '_latency', name: 'Latency of ' + device.name + ' (in ms)'});
-			variables.push({variableId: device.name + '_encoding', name: 'Encoding of ' + device.name});
-			variables.push({variableId: device.name + '_output_levels', name: 'Output levels of ' + device.name});
-			variables.push({variableId: device.name + '_model_name', name: 'Model name of ' + device.name});
-			variables.push({variableId: device.name + '_product_version', name: 'Product version of ' + device.name});
-			variables.push({variableId: device.name + '_clock_role', name: 'Clock role of ' + device.name});
-			variables.push({variableId: device.name + '_clock_synced', name: 'Clock sync status of ' + device.name});
+			variables[device.name + '_ip'] = { name: 'Ip address of ' + device.name };
+			variables[device.name + '_tx'] = { name: 'Number of outputs for ' + device.name };
+			variables[device.name + '_tx_names'] = { name: 'Output names for ' + device.name };
+			variables[device.name + '_rx'] = { name: 'Number of inputs for ' + device.name };
+			variables[device.name + '_rx_names'] = { name: 'Input names for ' + device.name };
+			variables[device.name + '_sr'] = { name: 'Sample rate of ' + device.name };
+			variables[device.name + '_pullup'] = { name: 'Sample rate pullup of ' + device.name };
+			variables[device.name + '_latency'] = { name: 'Latency of ' + device.name + ' (in ms)' };
+			variables[device.name + '_encoding'] = { name: 'Encoding of ' + device.name };
+			variables[device.name + '_output_levels'] = { name: 'Output levels of ' + device.name };
+			variables[device.name + '_model_name'] = { name: 'Model name of ' + device.name };
+			variables[device.name + '_product_version'] = { name: 'Product version of ' + device.name };
+			variables[device.name + '_clock_role'] = { name: 'Clock role of ' + device.name };
+			variables[device.name + '_clock_synced'] = { name: 'Clock sync status of ' + device.name };
 		}
 			
 		self.setVariableDefinitions(variables);

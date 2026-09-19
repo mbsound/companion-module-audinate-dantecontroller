@@ -4,6 +4,7 @@ const merge = require("./utils/merge");
 const { networkInterfaces } = require('os');
 const { InstanceStatus, Regex } = require('@companion-module/base')
 const {DANTE_CONST, object2choices} = require("./const");
+const { loadCache, saveCache } = require("./cache");
 
 
 
@@ -186,6 +187,7 @@ const parseRxChannels = (reply) => {
 	const channelStatusOffset =  12;
 	const subscriptionStatusOffset = 14;
 	
+	let firstChannelGroup = 0;
 	// for each channel
 	for (let i = 0; i < Math.min(recCount,32) ; i++) {
 		// get info chunk of channel
@@ -335,7 +337,7 @@ module.exports = {
 	},
 	
 	checkConnections() {
-		for (const service of ['ARC', 'CMC', 'SETTINGS', 'HEARTBEAT']) {
+		for (const service of ['ARC', 'CMC']) {
 			if (!this.activeConnections[service]) {
 				if (this.CONNECTED) {
 					this.CONNECTED = false;
@@ -358,6 +360,9 @@ module.exports = {
 
 		this.debug = this.config.verbose;
 		this.timeout = parseInt(this.config.timeoutInterval, 10) || 0;
+		if (this.timeout > 0 && this.timeout < 15000) {
+			this.timeout = 15000;
+		}
 		this.activeConnections = {};
 		self.updateStatus(InstanceStatus.Connecting);
 		
@@ -376,9 +381,17 @@ module.exports = {
 		self.devicesData = {};
 		
 		// create actions and feedback dropdown choices
-		self.devicesChoices = [];
-		self.txChannelsChoices = {};
-		self.rxChannelsChoices = {};
+		const cached = loadCache();
+		self.devicesChoices = (cached && Array.isArray(cached.devicesChoices) && cached.devicesChoices.length > 0)
+			? cached.devicesChoices
+			: [];
+		self.log('info', `[CACHE DEBUG] initConnection loaded ${self.devicesChoices.length} devices: ${self.devicesChoices.map(d => d.id).join(',')}`);
+		self.txChannelsChoices = (cached && cached.txChannelsChoices && typeof cached.txChannelsChoices === 'object')
+			? cached.txChannelsChoices
+			: {};
+		self.rxChannelsChoices = (cached && cached.rxChannelsChoices && typeof cached.rxChannelsChoices === 'object')
+			? cached.rxChannelsChoices
+			: {};
 		self.txFriendlyNameRefreshCounter = 0;
 		self.meteringSubscriptions = {};
 		self.meteringNeedsFeedbackCheck = false;
@@ -404,12 +417,12 @@ module.exports = {
 		this.sockets = {};
 		
 		// create Dante ARC socket
-		this.sockets.ARC = dgram.createSocket({type: "udp4" , reusePort: true, reuseAddr:true});
+		this.sockets.ARC = dgram.createSocket({type: "udp4", reuseAddr: true});
 		const arcSocket = this.sockets.ARC;
 		
        	arcSocket.on("message", this.parseReply.bind(this));
    		arcSocket.on("error", (error)=>{
-			self.log('error','ARC socket : ', error.message);
+			self.log('error', 'ARC socket: ' + (error?.message || error));
 			self.activeConnections.ARC = false;
 			if (self.CONNECTED) {
 				self.updateStatus(InstanceStatus.Disconnected);
@@ -431,64 +444,64 @@ module.exports = {
 			self.checkConnections();
 		}); 
 		
+		let boundIp = self.config.ip;
+		if (!availableIps.includes(boundIp)) {
+			boundIp = availableIps.find(ip => ip.startsWith('169.254.')) || availableIps[0];
+			if (boundIp) {
+				self.log('info', `Configured IP (${self.config.ip || 'none'}) not available, auto-selecting interface: ${boundIp}`);
+			}
+		}
+		self.boundIp = boundIp;
+
 		// bind socket to random port of configured ip address if available
-		if (availableIps.includes(self.config.ip)) {
-			arcSocket.bind(0, self.config.ip);
-			this.mac = Buffer.from(availableMacs[self.config.ip].replaceAll(':',''), 'hex'); 
+		if (boundIp) {
+			arcSocket.bind(0, boundIp);
+			this.mac = Buffer.from((availableMacs[boundIp] || '00:00:00:00:00:00').replaceAll(':',''), 'hex'); 
 		} else {
-			this.log('warn', "Config IP not available");
+			this.log('warn', "No suitable network interface available");
 			arcSocket.bind();
 			this.mac = Buffer.from('000000000000', 'hex');
 		}
 
 
 		// create Dante settings socket
-		this.sockets.SETTINGS = dgram.createSocket({type: "udp4", reusePort:true, reuseAddr: true});
+		this.sockets.SETTINGS = dgram.createSocket({type: "udp4", reuseAddr: true});
 		const settingSocket = this.sockets.SETTINGS;
 		settingSocket.on("message", this.parseSettingsReply.bind(this));	
 		
   		settingSocket.on("error", (error)=>{
-			self.log('error', 'Settings socket : ', error.message);
+			self.log('warn', 'Settings socket notice: ' + (error?.message || error));
 			self.activeConnections.SETTINGS = false;
-			if (self.CONNECTED) {
-				self.updateStatus(InstanceStatus.Disconnected);
-				self.CONNECTED = false;
-			}
 		});
 		
 		settingSocket.on("close", ()=> {
 			self.log('warn', 'Settings socket closed');
 			self.activeConnections.SETTINGS = false;
-			if (self.CONNECTED) {
-				self.updateStatus(InstanceStatus.Disconnected);
-				self.CONNECTED = false;
-			}
 		});
  
 		settingSocket.on ("listening", () => {  
-			if (availableIps.includes(self.config.ip)) {
-				settingSocket.addMembership(DANTE_CONST.MULTICAST_IP.INFO, self.config.ip);
+			if (boundIp) {
+				try { settingSocket.addMembership(DANTE_CONST.MULTICAST_IP.INFO, boundIp); } catch (e) {}
 			} else {
-				settingSocket.addMembership(DANTE_CONST.MULTICAST_IP.INFO, );
+				try { settingSocket.addMembership(DANTE_CONST.MULTICAST_IP.INFO); } catch (e) {}
 			}
 			self.activeConnections.SETTINGS = true;
-			self.checkConnections();
 		});
 		
-		if (availableIps.includes(self.config.ip)) {
-			settingSocket.bind(DANTE_CONST.PORTS.INFO, self.config.ip);
-		} else {
+		try {
 			settingSocket.bind(DANTE_CONST.PORTS.INFO);
+		} catch (e) {
+			self.log('warn', 'Settings socket bind notice: ' + (e?.message || e));
 		}
 		
 
 		// create Dante CMC socket
-		this.sockets.CMC = dgram.createSocket({type: "udp4", reusePort:true, reuseAddr: true});
+		this.sockets.CMC = dgram.createSocket({type: "udp4", reuseAddr: true});
 		const cmcSocket = this.sockets.CMC;
 		cmcSocket.on("message", this.parseCmcReply.bind(this));	
 		
   		cmcSocket.on("error", (error)=>{
-			self.log('error', 'CMC socket : ', error.message);
+			self.log('error', 'CMC socket: ' + (error?.message || error));
 			self.activeConnections.CMC = false;
 			if (self.CONNECTED) {
 				self.updateStatus(InstanceStatus.Disconnected);
@@ -510,50 +523,41 @@ module.exports = {
 			self.checkConnections();
 		}); 
 		
-		if (availableIps.includes(self.config.ip)) {
-			cmcSocket.bind({address: self.config.ip});
+		if (boundIp) {
+			cmcSocket.bind({address: boundIp});
 		} else {
 			cmcSocket.bind();
 		}
 		
 		
 		// create Dante heartbeat socket
-		this.sockets.HEARTBEAT = dgram.createSocket({type: "udp4", reusePort:true, reuseAddr: true});
+		this.sockets.HEARTBEAT = dgram.createSocket({type: "udp4", reuseAddr: true});
 		const heartbeatSocket = this.sockets.HEARTBEAT;
 		heartbeatSocket.on("message", this.parseHeartbeatReply.bind(this));	
 		
   		heartbeatSocket.on("error", (error)=>{
-			self.log('error', 'Heartbeat socket : ', error.message);
+			self.log('warn', 'Heartbeat socket notice: ' + (error?.message || error));
 			self.activeConnections.HEARTBEAT = false;
-			if (self.CONNECTED) {
-				self.updateStatus(InstanceStatus.Disconnected);
-				self.CONNECTED = false;
-			}
 		});
 		
 		heartbeatSocket.on("close", ()=> {
 			self.log('warn', 'Heartbeat socket closed');
 			self.activeConnections.HEARTBEAT = false;
-			if (self.CONNECTED) {
-				self.updateStatus(InstanceStatus.Disconnected);
-				self.CONNECTED = false;
-			}
 		});
 		
 		heartbeatSocket.on ("listening", () => {  
-			if (availableIps.includes(self.config.ip)) {
-				heartbeatSocket.addMembership(DANTE_CONST.MULTICAST_IP.HEARTBEAT, self.config.ip);
+			if (boundIp) {
+				try { heartbeatSocket.addMembership(DANTE_CONST.MULTICAST_IP.HEARTBEAT, boundIp); } catch (e) {}
 			} else {
-				heartbeatSocket.addMembership(DANTE_CONST.MULTICAST_IP.HEARTBEAT, );
+				try { heartbeatSocket.addMembership(DANTE_CONST.MULTICAST_IP.HEARTBEAT); } catch (e) {}
 			}
 			self.activeConnections.HEARTBEAT = true;
-			self.checkConnections();
 		});
 		
-		if (availableIps.includes(self.config.ip)) {
-			heartbeatSocket.bind(DANTE_CONST.PORTS.HEARTBEAT, self.config.ip);
-		} else {
+		try {
 			heartbeatSocket.bind(DANTE_CONST.PORTS.HEARTBEAT);
+		} catch (e) {
+			self.log('warn', 'Heartbeat socket bind notice: ' + (e?.message || e));
 		}
 		
 		// create Dante Metering listener socket (port 8751)
@@ -562,23 +566,27 @@ module.exports = {
 			const meteringSocket = this.sockets.METERING;
 			meteringSocket.on("message", this.parseMeteringSocketReply.bind(this));
 			meteringSocket.on("error", (err) => {
-				self.log('debug', 'Metering socket (8751) notice: ' + err.message);
+				self.log('warn', 'Metering socket (8751) notice: ' + err.message);
 			});
-			if (availableIps.includes(self.config.ip)) {
-				meteringSocket.bind(8751, self.config.ip);
+			meteringSocket.on("listening", () => {
+				const addr = meteringSocket.address();
+				self.log('info', `Metering socket listening on ${addr.address}:${addr.port}`);
+			});
+			if (boundIp) {
+				meteringSocket.bind(8751, boundIp);
 			} else {
 				meteringSocket.bind(8751);
 			}
 		} catch (err) {
-			self.log('debug', 'Metering socket creation optional: ' + err.message);
+			self.log('warn', 'Metering socket creation error: ' + err.message);
 		}
 
 		self.setupInterval(); 
 		
-		if (availableIps.includes(self.config.ip)) {
-			self.mdns = multidns({interface: self.config.ip});
+		if (boundIp) {
+			self.mdns = multidns({ bind: '0.0.0.0', interface: boundIp });
 		} else {
-			self.mdns = multidns();
+			self.mdns = multidns({ bind: '0.0.0.0' });
 		}
 		self.mdns.on('response', self.dante_discovery.bind(this));
 		
@@ -592,7 +600,12 @@ module.exports = {
 	insertDeviceChoice: function (deviceIp, deviceName) {
 		this.log('info', `INSERT DEVICE : ${deviceName}, ip : ${deviceIp}`);
 
-		this.devicesChoices.push({id: deviceIp, label: deviceName});
+		const existing = this.devicesChoices.find(d => d.id === deviceIp);
+		if (existing) {
+			existing.label = deviceName;
+		} else {
+			this.devicesChoices.push({id: deviceIp, label: deviceName});
+		}
 		this.devicesChoices.sort((deviceA, deviceB) => {
 				return deviceA.label.localeCompare(deviceB.label);
 		});
@@ -623,39 +636,47 @@ module.exports = {
 	
 	// create or update channels name in dropdown choices for either rx or tx (channelType)
 	updateChannelChoices: function(deviceIp, channelType) {
-		
 		if (!this.devicesData[deviceIp]?.[channelType]) {
 			this.log('error', "ERROR : Can't update channelsChoices for device " + deviceIp);
 			return;
 		}
-  
+
 		let deviceName = this.devicesData[deviceIp].name;
 		let ioObject = this.devicesData[deviceIp][channelType];
-  
-		let channelChoice = [{id: 0, label:'None'}];
-		if (channelType == 'tx') {
-			for (let i = 1; i<= ioObject.count; i++) {
-				let channelName = this.getChannelSubscriptionName(ioObject[i]);
-				channelChoice[i] = {id: i, label : channelName};
+
+		const numKeys = Object.keys(ioObject).map(Number).filter(n => Number.isInteger(n) && n > 0);
+		const maxKey = numKeys.length > 0 ? Math.max(...numKeys) : 0;
+		const count = Math.max(ioObject.count || 0, maxKey);
+
+		let channelChoice = [{ id: 0, label: 'None' }];
+		for (let i = 1; i <= count; i++) {
+			const indexString = i.toString().padStart(2, '0');
+			let channelName = '';
+			if (channelType === 'tx') {
+				channelName = this.getChannelSubscriptionName(ioObject[i]) || '';
+			} else {
+				channelName = ioObject[i]?.friendlyName || ioObject[i]?.name || '';
 			}
-		} else if (channelType == 'rx') {
-			for (let i = 1; i<= ioObject.count; i++) {
-				let indexString = i.toString().padStart(2,'0');
-				let channelName = ioObject[i]?.name ?? '';
-				channelChoice.push({id: i, label: channelName}); //indexString + (channelName ? ' : ' + channelName : '')});
+			const label = (channelName && channelName !== String(i) && channelName !== indexString)
+				? `${i}: ${channelName}`
+				: `Channel ${i}`;
+			channelChoice.push({ id: i, label: label });
+		}
+
+		const existing = this[channelType + 'ChannelsChoices'][deviceName];
+		let changed = !existing || existing.length !== channelChoice.length;
+		if (!changed && existing) {
+			for (let i = 0; i < channelChoice.length; i++) {
+				if (existing[i]?.id !== channelChoice[i]?.id || existing[i]?.label !== channelChoice[i]?.label) {
+					changed = true;
+					break;
+				}
 			}
 		}
-		if (!this[channelType + 'ChannelsChoices'][deviceName]) {
-			this[channelType+'ChannelsChoices'][deviceName] = channelChoice;
+
+		if (changed) {
+			this[channelType + 'ChannelsChoices'][deviceName] = channelChoice;
 			this.updateData();
-		} else {
-			for (let i=1; i < channelChoice.length; i++) {
-				if (!this[channelType + 'ChannelsChoices'][deviceName][i] || channelChoice[i].label != this[channelType + 'ChannelsChoices'][deviceName][i].label) {
-					this[channelType+'ChannelsChoices'][deviceName] = channelChoice;
-					this.updateData();
-					break;
-				}	
-			}
 		}
 	},
 
@@ -732,12 +753,14 @@ module.exports = {
 
           if (bufferToInt(reply, 0) == DANTE_CONST.PROTOCOL.CONTROL && replySize === bufferToInt(reply, 2)){
  
-//			// network is alive
-//			this.updateStatus(InstanceStatus.Ok);
-//			this.CONNECTED = true;
-//			
-//			// device is online
-//			this.keepAlive(deviceIp);
+			// network is alive
+			if (!this.CONNECTED) {
+				this.updateStatus(InstanceStatus.Ok);
+				this.CONNECTED = true;
+			}
+			
+			// device is online
+			this.keepAlive(deviceIp);
 
             const commandId = bufferToInt(reply, 6);
 			
@@ -823,12 +846,12 @@ module.exports = {
 					case 'rx':
 						this.checkVariables(deviceIp, 'rx', 'rx_names');
 						this.updateChannelChoices(deviceIp, flag);
-						this.checkFeedbacks();
+						this.checkAllFeedbacks();
 						break;
 					case 'tx':
 						this.checkVariables(deviceIp, 'tx', 'tx_names');
 						this.updateChannelChoices(deviceIp, flag);
-						this.checkFeedbacks();
+						this.checkAllFeedbacks();
 						break;
 					case 'rxCount':
 						this.getRxChannels(deviceIp);
@@ -888,11 +911,14 @@ module.exports = {
 				this.updateStatus(InstanceStatus.Ok);
 				this.CONNECTED = true;
 			}
+			
+			// device is online
+			this.keepAlive(deviceIp);
 			const payload = reply.slice(24);
                const commandId = bufferToInt(payload, 2);
                
 			deviceData[deviceIp] = {};
-			currDevice = deviceData[deviceIp];
+			let currDevice = deviceData[deviceIp];
 			
 			
 			switch (commandId) {
@@ -1123,7 +1149,7 @@ module.exports = {
 		if (bufferToInt(reply, 0) == DANTE_CONST.PROTOCOL.CMC && replySize == bufferToInt(reply,2)) {
 			const commandId = bufferToInt(reply, 6);
 			deviceData[deviceIp] = {};
-			currDevice = deviceData[deviceIp];
+			let currDevice = deviceData[deviceIp];
 			
 			switch (commandId) {
 				case 0x1001 : {
@@ -1161,12 +1187,12 @@ module.exports = {
 //			}
 //		}
 
-		const port = forcePort ?? this.devicesData?.[host]?.ports?.[service];
+		const port = forcePort ?? this.devicesData?.[host]?.ports?.[service] ?? DANTE_CONST.PORTS[service];
 		if (port) {	
 			this.sockets[service]?.send(command, 0, command.length, port, host); 
 		} else {
 			const deviceId = this.devicesData[host]?.name ?? host;
-			this.log('error', `Undefined port for service ${service} for device ${deviceId}`); return;
+			this.log('debug', `Undefined port for service ${service} for device ${deviceId}`); return;
 		}
     },
 
@@ -1226,16 +1252,53 @@ module.exports = {
     },
 
     setDeviceName(ipaddress, name) {
-        const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.setDeviceName, Buffer.from(name, "ascii"));
-        this.sendCommand(commandBuffer, ipaddress);
+        try {
+            const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.setDeviceName, Buffer.from(String(name || ''), "ascii"));
+            this.sendCommand(commandBuffer, ipaddress);
+        } catch (err) {
+            this.log('error', `Error setting device name: ${err?.message || err}`);
+        }
     },
 
     setChannelName(ipaddress, channelName = "", channelType = "rx", channelNumber = 0) {
-        const channelNameBuffer = Buffer.from(channelName, "ascii");
-        let commandBuffer = Buffer.alloc(1);
-        let channelNumberBuffer = intToBuffer(channelNumber); 
+        try {
+            const channelNameBuffer = Buffer.from(String(channelName || ''), "ascii");
+            let commandBuffer = Buffer.alloc(1);
+            let channelNumberBuffer = intToBuffer(parseInt(channelNumber, 10) || 0); 
 
-        if (channelType === "rx") {
+            if (channelType === "rx") {
+                const commandArguments = Buffer.concat([
+                    Buffer.from("0401", "hex"),
+                    channelNumberBuffer,
+                    Buffer.from("001c", "hex"),
+                    Buffer.alloc(12),
+                    channelNameBuffer,
+                ]);
+                commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_RX_CHANNEL_CONTROL, commandArguments);
+            } else if (channelType === "tx") {
+                const commandArguments = Buffer.concat([
+                    Buffer.from("040100000", "hex"),
+                    channelNumberBuffer,
+                    Buffer.from("0024", "hex"),
+                    Buffer.alloc(18),
+                    channelNameBuffer,
+                ]);
+                commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_TX_CHANNEL_NAMES_CONTROL, commandArguments);
+            } else {
+                throw new Error("Invalid Channel Type - must be 'tx' or 'rx'");
+            }
+            this.sendCommand(commandBuffer, ipaddress);
+        } catch (err) {
+            this.log('error', `Error setting channel name: ${err?.message || err}`);
+        }
+    },
+	
+   setRxChannelName(ipaddress, channelNumber, channelName = "") {
+        try {
+            const channelNameBuffer = Buffer.from(String(channelName || ''), "ascii");
+            let commandBuffer = Buffer.alloc(1);
+            let channelNumberBuffer = intToBuffer(parseInt(channelNumber, 10) || 0); 
+
             const commandArguments = Buffer.concat([
                 Buffer.from("0401", "hex"),
                 channelNumberBuffer,
@@ -1244,7 +1307,18 @@ module.exports = {
                 channelNameBuffer,
             ]);
             commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_RX_CHANNEL_CONTROL, commandArguments);
-        } else if (channelType === "tx") {
+            this.sendCommand(commandBuffer, ipaddress);
+        } catch (err) {
+            this.log('error', `Error setting RX channel name: ${err?.message || err}`);
+        }
+    },
+
+    setTxChannelName(ipaddress, channelNumber, channelName = "") {
+        try {
+            const channelNameBuffer = Buffer.from(String(channelName || ''), "ascii");
+            let commandBuffer = Buffer.alloc(1);
+            let channelNumberBuffer = intToBuffer(parseInt(channelNumber, 10) || 0); 
+
             const commandArguments = Buffer.concat([
                 Buffer.from("040100000", "hex"),
                 channelNumberBuffer,
@@ -1253,43 +1327,11 @@ module.exports = {
                 channelNameBuffer,
             ]);
             commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_TX_CHANNEL_NAMES_CONTROL, commandArguments);
-        } else {
-            throw "Invalid Channel Type - must be 'tx' or 'rx'";
+
+            this.sendCommand(commandBuffer, ipaddress);
+        } catch (err) {
+            this.log('error', `Error setting TX channel name: ${err?.message || err}`);
         }
-        this.sendCommand(commandBuffer, ipaddress);
-    },
-	
-   setRxChannelName(ipaddress, channelNumber, channelName = "") {
-        const channelNameBuffer = Buffer.from(channelName, "ascii");
-        let commandBuffer = Buffer.alloc(1);
-        let channelNumberBuffer = intToBuffer(channelNumber); 
-
-        const commandArguments = Buffer.concat([
-            Buffer.from("0401", "hex"),
-            channelNumberBuffer,
-            Buffer.from("001c", "hex"),
-            Buffer.alloc(12),
-            channelNameBuffer,
-        ]);
-        commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_RX_CHANNEL_CONTROL, commandArguments);
-        this.sendCommand(commandBuffer, ipaddress);
-    },
-
-    setTxChannelName(ipaddress, channelNumber, channelName = "") {
-        const channelNameBuffer = Buffer.from(channelName, "ascii");
-        let commandBuffer = Buffer.alloc(1);
-        let channelNumberBuffer = intToBuffer(channelNumber); 
-
-        const commandArguments = Buffer.concat([
-            Buffer.from("040100000", "hex"),
-            channelNumberBuffer,
-            Buffer.from("0024", "hex"),
-            Buffer.alloc(18),
-            channelNameBuffer,
-        ]);
-        commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_TX_CHANNEL_NAMES_CONTROL, commandArguments);
-
-        this.sendCommand(commandBuffer, ipaddress);
     },
 
     resetChannelName(ipaddress, channelType = "rx", channelNumber = 0) {
@@ -1307,129 +1349,265 @@ module.exports = {
 
 
     makeCrosspoint(destinationDevice, sourceChannelName, sourceDeviceName, destinationChannel) {
-		const sourceChannel = this.findTxChannelByName(sourceDeviceName, sourceChannelName);
-		const sourceSubscriptionName = this.getChannelSubscriptionName(sourceChannel) || sourceChannelName;
-        const sourceChannelNameBuffer = Buffer.from(sourceSubscriptionName, "ascii");
-        const sourceDeviceNameBuffer = Buffer.from(sourceDeviceName, "ascii");
+		try {
+			if (!destinationDevice || destinationDevice === '') {
+				this.log('warn', 'Make Crosspoint aborted: No destination device specified');
+				return;
+			}
+			if (!sourceDeviceName || sourceDeviceName === '') {
+				this.log('warn', 'Make Crosspoint aborted: No source device specified');
+				return;
+			}
+			if (destinationChannel === undefined || destinationChannel === null || destinationChannel === '' || destinationChannel === 0 || destinationChannel === '0') {
+				this.log('warn', 'Make Crosspoint aborted: No destination channel specified');
+				return;
+			}
+			if (sourceChannelName === undefined || sourceChannelName === null || sourceChannelName === '' || sourceChannelName === 0 || sourceChannelName === '0') {
+				this.log('warn', 'Make Crosspoint aborted: No source channel specified');
+				return;
+			}
 
-		const destinationChannelNumber = this.findRxChannelByName(destinationDevice, destinationChannel)?.number ?? destinationChannel
+			// Check if destinationDevice is an IP or a name
+			const IP = RegExp(Regex.IP.slice(1,-1));
+			const ipaddress = IP.test(destinationDevice) ? destinationDevice : this.findDeviceIpByName(destinationDevice);
+			
+			if (!ipaddress) {
+				this.log('error', "Can't find " + destinationDevice + " IP address");
+				return;
+			}
 
-		// Check if destinationDevice is an IP or a name
-		const IP = RegExp(Regex.IP.slice(1,-1));
-		const ipaddress = IP.test(destinationDevice) ? destinationDevice : this.findDeviceIpByName(destinationDevice);
-		
-		if (!ipaddress) {
-			this.log('error', "Can't find " + destinationDevice + " IP address");
-			return;
+			let destChanNum = this.findRxChannelByName(destinationDevice, destinationChannel)?.number ?? destinationChannel;
+			destChanNum = parseInt(destChanNum, 10);
+			if (isNaN(destChanNum) || destChanNum <= 0) {
+				this.log('warn', `Make Crosspoint: Invalid destination channel "${destinationChannel}" for ${destinationDevice}`);
+				return;
+			}
+
+			// Resolve canonical source device name (must be Dante advertised name, not IP)
+			let canonicalSourceDeviceName = sourceDeviceName;
+			if (this.devicesData[sourceDeviceName]?.name) {
+				canonicalSourceDeviceName = this.devicesData[sourceDeviceName].name;
+			} else {
+				canonicalSourceDeviceName = String(sourceDeviceName).trim();
+			}
+
+			// Resolve canonical source channel subscription name
+			const sourceChannel = this.findTxChannelByName(canonicalSourceDeviceName, sourceChannelName) 
+				|| this.findTxChannelByName(sourceDeviceName, sourceChannelName);
+			
+			let sourceSubscriptionName = this.getChannelSubscriptionName(sourceChannel) || sourceChannelName;
+
+			// If sourceSubscriptionName is numeric (e.g. 1 or "1"), format properly
+			const numericTxChan = parseInt(sourceSubscriptionName, 10);
+			if (!isNaN(numericTxChan) && String(numericTxChan) === String(sourceSubscriptionName).trim()) {
+				const srcDevObj = this.devicesData[sourceDeviceName] || this.devicesData[this.findDeviceIpByName(canonicalSourceDeviceName)];
+				if (srcDevObj?.tx?.[numericTxChan]?.friendlyName) {
+					sourceSubscriptionName = srcDevObj.tx[numericTxChan].friendlyName;
+				} else if (srcDevObj?.tx?.[numericTxChan]?.name) {
+					sourceSubscriptionName = srcDevObj.tx[numericTxChan].name;
+				} else {
+					sourceSubscriptionName = numericTxChan.toString().padStart(2, '0');
+				}
+			}
+
+			sourceSubscriptionName = String(sourceSubscriptionName || '');
+			canonicalSourceDeviceName = String(canonicalSourceDeviceName || '');
+
+			if (!sourceSubscriptionName || !canonicalSourceDeviceName) {
+				this.log('warn', 'Make Crosspoint aborted: Invalid source channel name or source device name');
+				return;
+			}
+
+			const sourceChannelNameBuffer = Buffer.from(sourceSubscriptionName, "ascii");
+			const sourceDeviceNameBuffer = Buffer.from(canonicalSourceDeviceName, "ascii");
+
+			// 10 bytes DGCP header + 2 bytes count + 6 bytes entry + 4 bytes padding = 22
+			const chanNameOffset = 22;
+			const devNameOffset = chanNameOffset + sourceChannelNameBuffer.length + 1;
+
+			let commandArguments = Buffer.concat([
+				intToBuffer(1, 2), 									// 1 channel subscription
+				intToBuffer(destChanNum, 2),			            // destination channel number
+				intToBuffer(chanNameOffset, 2), 					// Byte index of source channel Name
+				intToBuffer(devNameOffset, 2), 						// Byte index of source device name
+				Buffer.alloc(4),									// 4-byte padding
+				sourceChannelNameBuffer,							// source channel Name
+				Buffer.alloc(1),									// null terminator (\x00)
+				sourceDeviceNameBuffer,								// source device name
+				Buffer.alloc(1)										// null terminator (\x00)
+			]);
+
+			const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
+			this.sendCommand(commandBuffer, ipaddress);
+
+			setTimeout(() => {
+				try {
+					this.getRxChannels(ipaddress);
+				} catch (e) {
+					this.log('debug', `Error refreshing RX channels after makeCrosspoint: ${e?.message}`);
+				}
+			}, 300);
+		} catch (err) {
+			this.log('error', `Error in makeCrosspoint: ${err?.message || err}`);
 		}
-
-		// 10 bytes DGCP header + 2 bytes count + 6 bytes entry + 4 bytes padding = 22
-		const chanNameOffset = 22;
-		const devNameOffset = chanNameOffset + sourceChannelNameBuffer.length + 1;
-
-        let commandArguments = Buffer.concat([
-			intToBuffer(1, 2), 									// 1 channel subscription
-			intToBuffer(destinationChannelNumber, 2),			// destination channel number
-			intToBuffer(chanNameOffset, 2), 					// Byte index of source channel Name
-			intToBuffer(devNameOffset, 2), 						// Byte index of source device name
-			Buffer.alloc(4),									// 4-byte padding
-			sourceChannelNameBuffer,							// source channel Name
-			Buffer.alloc(1),									// null terminator (\x00)
-			sourceDeviceNameBuffer,								// source device name
-			Buffer.alloc(1)										// null terminator (\x00)
-        ]);
-
-        const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
-        this.sendCommand(commandBuffer, ipaddress);
     },
 
     clearCrosspoint(destinationDevice, destinationChannel) {
-		const destinationChannelNumber = this.findRxChannelByName(destinationDevice, destinationChannel)?.number ?? destinationChannel
+		try {
+			if (!destinationDevice || destinationDevice === '') {
+				this.log('warn', 'Clear Crosspoint aborted: No destination device specified');
+				return;
+			}
+			if (destinationChannel === undefined || destinationChannel === null || destinationChannel === '' || destinationChannel === 0 || destinationChannel === '0') {
+				this.log('warn', 'Clear Crosspoint aborted: No destination channel specified');
+				return;
+			}
 
-		// Check if destinationDevice is an IP or a name
-		const IP = RegExp(Regex.IP.slice(1,-1));
-		const ipaddress = IP.test(destinationDevice) ? destinationDevice : this.findDeviceIpByName(destinationDevice);
-		
-		if (!ipaddress) {
-			this.log('error', "Can't find " + destinationDevice + " IP address");
-			return;
+			const IP = RegExp(Regex.IP.slice(1,-1));
+			const ipaddress = IP.test(destinationDevice) ? destinationDevice : this.findDeviceIpByName(destinationDevice);
+			
+			if (!ipaddress) {
+				this.log('error', "Can't find " + destinationDevice + " IP address");
+				return;
+			}
+
+			let destChanNum = this.findRxChannelByName(destinationDevice, destinationChannel)?.number ?? destinationChannel;
+			destChanNum = parseInt(destChanNum, 10);
+			if (isNaN(destChanNum) || destChanNum <= 0) {
+				this.log('warn', `Clear Crosspoint: Invalid destination channel "${destinationChannel}" for ${destinationDevice}`);
+				return;
+			}
+			
+			// Clean Audinate unsubscription: tx_chan offset = 0, tx_device offset = 0
+			let commandArguments = Buffer.concat([
+				intToBuffer(1, 2), 									// 1 channel subscription
+				intToBuffer(destChanNum, 2),			            // destination channel number
+				Buffer.from("00000000", "hex"),						// null string offsets (unsubscribes channel)
+				Buffer.alloc(4),									// 4-byte padding
+			]);
+
+			const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
+			this.sendCommand(commandBuffer, ipaddress);
+
+			setTimeout(() => {
+				try {
+					this.getRxChannels(ipaddress);
+				} catch (e) {
+					this.log('debug', `Error refreshing RX channels after clearCrosspoint: ${e?.message}`);
+				}
+			}, 300);
+		} catch (err) {
+			this.log('error', `Error in clearCrosspoint: ${err?.message || err}`);
 		}
-		
-		// Clean Audinate unsubscription: tx_chan offset = 0, tx_device offset = 0
-        let commandArguments = Buffer.concat([
-            intToBuffer(1, 2), 									// 1 channel subscription
-            intToBuffer(destinationChannelNumber, 2),			// destination channel number
-            Buffer.from("00000000", "hex"),						// null string offsets (unsubscribes channel)
-            Buffer.alloc(4),									// 4-byte padding
-        ]);
-
-        const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
-        this.sendCommand(commandBuffer, ipaddress);
     },
 
 	makeBatchCrosspoint(destinationDevice, routes) {
-		if (!Array.isArray(routes) || routes.length === 0) return;
+		try {
+			if (!Array.isArray(routes) || routes.length === 0) return;
 
-		const IP = RegExp(Regex.IP.slice(1,-1));
-		const ipaddress = IP.test(destinationDevice) ? destinationDevice : this.findDeviceIpByName(destinationDevice);
-		if (!ipaddress) {
-			this.log('error', "Can't find " + destinationDevice + " IP address");
-			return;
-		}
-
-		// DGCP header = 10 bytes, count = 2 bytes, each entry = 6 bytes
-		const entriesHeaderSize = 10 + 2 + (routes.length * 6);
-		// Add 4 bytes padding after entries table
-		let currentStringOffset = entriesHeaderSize + 4;
-
-		let entriesBuffers = [];
-		let stringPoolBuffers = [];
-
-		for (const route of routes) {
-			const rxNum = this.findRxChannelByName(destinationDevice, route.destinationChannel)?.number ?? route.destinationChannel;
-			const isUnsubscribe = !route.sourceDeviceName || !route.sourceChannelName;
-
-			if (isUnsubscribe) {
-				entriesBuffers.push(Buffer.concat([
-					intToBuffer(rxNum, 2),
-					Buffer.from("00000000", "hex")
-				]));
-			} else {
-				const txChan = this.findTxChannelByName(route.sourceDeviceName, route.sourceChannelName);
-				const subChanName = this.getChannelSubscriptionName(txChan) || route.sourceChannelName;
-				const chanBuf = Buffer.from(subChanName, "ascii");
-				const devBuf = Buffer.from(route.sourceDeviceName, "ascii");
-
-				const chanOffset = currentStringOffset;
-				currentStringOffset += chanBuf.length + 1;
-				const devOffset = currentStringOffset;
-				currentStringOffset += devBuf.length + 1;
-
-				entriesBuffers.push(Buffer.concat([
-					intToBuffer(rxNum, 2),
-					intToBuffer(chanOffset, 2),
-					intToBuffer(devOffset, 2)
-				]));
-
-				stringPoolBuffers.push(chanBuf, Buffer.alloc(1), devBuf, Buffer.alloc(1));
+			const IP = RegExp(Regex.IP.slice(1,-1));
+			const ipaddress = IP.test(destinationDevice) ? destinationDevice : this.findDeviceIpByName(destinationDevice);
+			if (!ipaddress) {
+				this.log('error', "Can't find " + destinationDevice + " IP address");
+				return;
 			}
+
+			// DGCP header = 10 bytes, count = 2 bytes, each entry = 6 bytes
+			const entriesHeaderSize = 10 + 2 + (routes.length * 6);
+			// Add 4 bytes padding after entries table
+			let currentStringOffset = entriesHeaderSize + 4;
+
+			let entriesBuffers = [];
+			let stringPoolBuffers = [];
+
+			for (const route of routes) {
+				let rxNum = this.findRxChannelByName(destinationDevice, route.destinationChannel)?.number ?? route.destinationChannel;
+				rxNum = parseInt(rxNum, 10);
+				if (isNaN(rxNum) || rxNum <= 0) continue;
+
+				const isUnsubscribe = !route.sourceDeviceName || !route.sourceChannelName;
+
+				if (isUnsubscribe) {
+					entriesBuffers.push(Buffer.concat([
+						intToBuffer(rxNum, 2),
+						Buffer.from("00000000", "hex")
+					]));
+				} else {
+					let srcDevName = route.sourceDeviceName;
+					if (this.devicesData[srcDevName]?.name) {
+						srcDevName = this.devicesData[srcDevName].name;
+					} else {
+						srcDevName = String(srcDevName).trim();
+					}
+
+					const txChan = this.findTxChannelByName(srcDevName, route.sourceChannelName) || this.findTxChannelByName(route.sourceDeviceName, route.sourceChannelName);
+					let subChanName = this.getChannelSubscriptionName(txChan) || route.sourceChannelName;
+
+					const numericTxChan = parseInt(subChanName, 10);
+					if (!isNaN(numericTxChan) && String(numericTxChan) === String(subChanName).trim()) {
+						const srcDevObj = this.devicesData[route.sourceDeviceName] || this.devicesData[this.findDeviceIpByName(srcDevName)];
+						if (srcDevObj?.tx?.[numericTxChan]?.friendlyName) {
+							subChanName = srcDevObj.tx[numericTxChan].friendlyName;
+						} else if (srcDevObj?.tx?.[numericTxChan]?.name) {
+							subChanName = srcDevObj.tx[numericTxChan].name;
+						} else {
+							subChanName = numericTxChan.toString().padStart(2, '0');
+						}
+					}
+
+					subChanName = String(subChanName || '');
+					srcDevName = String(srcDevName || '');
+
+					const chanBuf = Buffer.from(subChanName, "ascii");
+					const devBuf = Buffer.from(srcDevName, "ascii");
+
+					const chanOffset = currentStringOffset;
+					currentStringOffset += chanBuf.length + 1;
+					const devOffset = currentStringOffset;
+					currentStringOffset += devBuf.length + 1;
+
+					entriesBuffers.push(Buffer.concat([
+						intToBuffer(rxNum, 2),
+						intToBuffer(chanOffset, 2),
+						intToBuffer(devOffset, 2)
+					]));
+
+					stringPoolBuffers.push(chanBuf, Buffer.alloc(1), devBuf, Buffer.alloc(1));
+				}
+			}
+
+			if (entriesBuffers.length === 0) return;
+
+			let commandArguments = Buffer.concat([
+				intToBuffer(entriesBuffers.length, 2),
+				...entriesBuffers,
+				Buffer.alloc(4),
+				...stringPoolBuffers
+			]);
+
+			const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
+			this.sendCommand(commandBuffer, ipaddress);
+
+			setTimeout(() => {
+				try {
+					this.getRxChannels(ipaddress);
+				} catch (e) {
+					this.log('debug', `Error refreshing RX channels after makeBatchCrosspoint: ${e?.message}`);
+				}
+			}, 300);
+		} catch (err) {
+			this.log('error', `Error in makeBatchCrosspoint: ${err?.message || err}`);
 		}
-
-		let commandArguments = Buffer.concat([
-			intToBuffer(routes.length, 2),
-			...entriesBuffers,
-			Buffer.alloc(4),
-			...stringPoolBuffers
-		]);
-
-		const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.subscription, commandArguments);
-		this.sendCommand(commandBuffer, ipaddress);
 	},
 
 	clearBatchCrosspoint(destinationDevice, destinationChannels) {
-		if (!Array.isArray(destinationChannels) || destinationChannels.length === 0) return;
-		const routes = destinationChannels.map(ch => ({ destinationChannel: ch, sourceDeviceName: null, sourceChannelName: null }));
-		this.makeBatchCrosspoint(destinationDevice, routes);
+		try {
+			if (!Array.isArray(destinationChannels) || destinationChannels.length === 0) return;
+			const routes = destinationChannels.map(ch => ({ destinationChannel: ch, sourceDeviceName: null, sourceChannelName: null }));
+			this.makeBatchCrosspoint(destinationDevice, routes);
+		} catch (err) {
+			this.log('error', `Error in clearBatchCrosspoint: ${err?.message || err}`);
+		}
 	},
 
 	selectDestination(device, channel) {
@@ -1471,15 +1649,17 @@ module.exports = {
 			return
 		}
 		// clear registered friendly names
-		for (let i = 1; i<= this.devicesData[ipaddress].tx?.count; i++) {
+		const txCount = this.devicesData[ipaddress]?.tx?.count || 16;
+		for (let i = 1; i <= txCount; i++) {
 			const channel = this.devicesData[ipaddress]?.tx?.[i];
 			if (channel) {
 				delete channel.friendlyName;
 			}
 		}
 		let commandArguments = Buffer.from("0001000100", "hex");
-		for (let page = 0; page <= Math.ceil(this.devicesData[ipaddress]?.tx?.count/32); page++ ) {
-			commandArguments.writeUInt8(page*32+1, 3);
+		const maxPages = Math.ceil(txCount / 32);
+		for (let page = 0; page < maxPages; page++) {
+			commandArguments.writeUInt8(page * 32 + 1, 3);
 			const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_TX_CHANNEL_FRIENDLY_NAMES_QUERY, commandArguments);
 			this.sendCommand(commandBuffer, ipaddress); 
 		}
@@ -1487,8 +1667,10 @@ module.exports = {
 	
 	getTxChannels (ipaddress) {
 		let commandArguments = Buffer.from("0001000100", "hex");
-		for (let page = 0; page <= Math.ceil(this.devicesData[ipaddress]?.tx?.count/32); page++ ) {
-			commandArguments.writeUInt8(page*32+1, 3);
+		const txCount = this.devicesData[ipaddress]?.tx?.count || 16;
+		const maxPages = Math.ceil(txCount / 32);
+		for (let page = 0; page < maxPages; page++) {
+			commandArguments.writeUInt8(page * 32 + 1, 3);
 			const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_TX_CHANNEL_QUERY, commandArguments);
 			this.sendCommand(commandBuffer, ipaddress);
 		}
@@ -1496,8 +1678,10 @@ module.exports = {
 	
 	getRxChannels (ipaddress) {
 		let commandArguments = Buffer.from("0001000100", "hex");
-		for (let page = 0; page <= this.devicesData[ipaddress]?.tx?.count/16; page++ ) {
-			commandArguments.writeUInt8(page*16+1, 3);
+		const rxCount = this.devicesData[ipaddress]?.rx?.count || 16;
+		const maxPages = Math.ceil(rxCount / 16);
+		for (let page = 0; page < maxPages; page++) {
+			commandArguments.writeUInt8(page * 16 + 1, 3);
 			const commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_RX_CHANNEL_QUERY, commandArguments);
 			this.sendCommand(commandBuffer, ipaddress);
 		}
@@ -1606,10 +1790,7 @@ module.exports = {
 	},
 
 	getClocking(ipaddress) {
-		const commandBuffer = this.makeSettingCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_CLOCKING_CONTROL, Buffer.concat([
-			Buffer.from('00000064', 'hex'),
-			Buffer.alloc(8)
-		]));
+		const commandBuffer = this.makeSettingCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_CLOCKING_STATUS, intToBuffer(0, 4));
 		this.sendCommand(commandBuffer, ipaddress, 'SETTINGS');
 	},
 
@@ -1648,8 +1829,10 @@ module.exports = {
 	subscribeMetering(deviceIp) {
 		if (!deviceIp) return;
 		this.meteringSubscriptions = this.meteringSubscriptions || {};
-		this.meteringSubscriptions[deviceIp] = (this.meteringSubscriptions[deviceIp] || 0) + 1;
-		if (this.meteringSubscriptions[deviceIp] === 1) {
+		const isNew = !this.meteringSubscriptions[deviceIp];
+		this.meteringSubscriptions[deviceIp] = Date.now();
+		if (isNew) {
+			this.log('info', `Subscribing to metering for device: ${deviceIp}`);
 			this.requestMetering(deviceIp);
 			this.sendCmcSubscribe(deviceIp);
 		}
@@ -1657,34 +1840,40 @@ module.exports = {
 
 	unsubscribeMetering(deviceIp) {
 		if (!deviceIp || !this.meteringSubscriptions) return;
-		if (this.meteringSubscriptions[deviceIp] > 0) {
-			this.meteringSubscriptions[deviceIp]--;
-			if (this.meteringSubscriptions[deviceIp] <= 0) {
-				delete this.meteringSubscriptions[deviceIp];
-			}
-		}
+		delete this.meteringSubscriptions[deviceIp];
 	},
 
 	parseMeteringSocketReply(reply, rinfo) {
 		const deviceIp = rinfo.address;
-		if (reply.length >= 24 && bufferToInt(reply, 0) === DANTE_CONST.PROTOCOL.SETTINGS) {
-			const payload = reply.slice(24);
-			this.parseMeteringBody(payload.slice(4), deviceIp);
+		this.keepAlive(deviceIp);
+
+		let body;
+		const audIdx = reply.indexOf('Audinate');
+		if (audIdx !== -1 && reply.length > audIdx + 8) {
+			body = reply.slice(audIdx + 8);
+		} else if (reply.length >= 24) {
+			body = reply.slice(24);
 		} else {
-			this.parseMeteringBody(reply, deviceIp);
+			body = reply;
 		}
+
+		this.parseMeteringBody(body, deviceIp);
 	},
 
 	parseMeteringBody(body, deviceIp) {
 		if (!body || body.length < 3 || !deviceIp) return;
 
-		// Find the version byte (1, 2, or 3)
 		let offset = 0;
-		if (body[0] !== 1 && body[0] !== 2 && body[0] !== 3) {
-			if (body.length >= 7 && (body[4] === 1 || body[4] === 2 || body[4] === 3)) {
-				offset = 4;
-			} else {
-				return;
+		if (body[0] === 1 || body[0] === 2 || body[0] === 3) {
+			offset = 0;
+		} else if (body.length >= 7 && (body[4] === 1 || body[4] === 2 || body[4] === 3)) {
+			offset = 4;
+		} else {
+			for (let i = 0; i < Math.min(body.length - 3, 32); i++) {
+				if ((body[i] === 1 || body[i] === 2 || body[i] === 3) && body[i + 1] <= 128 && body[i + 2] <= 128) {
+					offset = i;
+					break;
+				}
 			}
 		}
 
@@ -1740,16 +1929,22 @@ module.exports = {
 	},
 
 	processMeteringTick() {
-		// 1. Refresh active metering subscriptions if any
-		const subscribedIps = Object.keys(this.meteringSubscriptions || {}).filter(
-			(ip) => this.meteringSubscriptions[ip] > 0
-		);
+		const now = Date.now();
+		// 1. Refresh active metering subscriptions if active within last 10 seconds
+		const activeIps = [];
+		for (const [ip, lastSeen] of Object.entries(this.meteringSubscriptions || {})) {
+			if (now - lastSeen < 10000) {
+				activeIps.push(ip);
+			} else {
+				delete this.meteringSubscriptions[ip];
+			}
+		}
 
-		if (subscribedIps.length > 0) {
+		if (activeIps.length > 0) {
 			this.meteringTickCounter = (this.meteringTickCounter || 0) + 1;
 			// Send request every 200ms (every 2nd tick of 100ms)
 			if (this.meteringTickCounter % 2 === 0) {
-				for (const ip of subscribedIps) {
+				for (const ip of activeIps) {
 					this.requestMetering(ip);
 					this.sendCmcSubscribe(ip);
 				}
@@ -1783,7 +1978,7 @@ module.exports = {
 			intToBuffer(20), // command size
 			this.counter,
 			intToBuffer(0x1001),
-			intToBuffer(0000),
+			intToBuffer(0x0000),
 			intToBuffer(0x3520),
 			this.mac,
 			intToBuffer(0x0000)
@@ -1901,19 +2096,20 @@ module.exports = {
 	refreshSettings: function(deviceIp) {
 		const ipArray = deviceIp ? [deviceIp] : Object.keys(this.devicesData);
 		for (const ip of ipArray) {
+			if (!this.devicesData[ip]?.ports?.SETTINGS) continue;
 			this.getSampleRate(ip);
 			this.getPullup(ip);
 			this.getEncoding(ip);
 			this.getLevel(ip);
 			this.getVersion(ip);
 			this.getManfVersion(ip);
-			this.getClocking(ip);
 		}
 	},
 	
 	refreshArc:  function(deviceIp) {
 		const ipArray = deviceIp ? [deviceIp] : Object.keys(this.devicesData);
 		for (const ip of ipArray) {
+			if (!this.devicesData[ip]?.ports?.ARC) continue;
 			this.getDeviceName(ip);
 			this.getSettings(ip);
 			this.getRxChannels(ip);
@@ -2064,13 +2260,26 @@ module.exports = {
 	
 	updateData: function (bytes) {
 		let self = this;
-	
-		//do more stuff
-		this.initActions();
-		this.initVariables();
-		this.checkVariables();
-		this.initFeedbacks();
-		this.checkFeedbacks();
-		this.initPresets();
+		if (this._updateDataTimer) {
+			clearTimeout(this._updateDataTimer);
+		}
+		this._updateDataTimer = setTimeout(() => {
+			this._updateDataTimer = null;
+			try {
+				saveCache({
+					devicesChoices: this.devicesChoices,
+					txChannelsChoices: this.txChannelsChoices,
+					rxChannelsChoices: this.rxChannelsChoices,
+				});
+				this.initActions();
+				this.initVariables();
+				this.checkVariables();
+				this.initFeedbacks();
+				this.checkAllFeedbacks();
+				this.initPresets();
+			} catch (err) {
+				this.log?.('error', 'Error in updateData: ' + (err?.message || err));
+			}
+		}, 300);
 	},
 }

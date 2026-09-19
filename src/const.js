@@ -1,4 +1,4 @@
-DANTE_CONST = {
+const DANTE_CONST = {
 	
 	SERVICES : {
 		ARC : '_netaudio-arc._udp.local', 
@@ -276,27 +276,41 @@ DANTE_CONST = {
 
 const object2choices = (obj) => {
 	let choices = [];
-	for (const [id, label] of Object.entries(obj)) {
-		choices.push({id: id, label: label})
-	};
-	return choices;
+	if (obj) {
+		for (const [id, label] of Object.entries(obj)) {
+			choices.push({id: id, label: label});
+		}
+	}
+	return choices.length > 0 ? choices : [{ id: '', label: 'None' }];
 };
 
 const object2PartialChoices = (obj, optionsArray) => {
 	let choices = [];
-	for (const [id, label] of Object.entries(obj)) { 
-		if (optionsArray?.includes(id)) {
-			choices.push({id: id, label: label})
+	if (obj && Array.isArray(optionsArray)) {
+		for (const [id, label] of Object.entries(obj)) { 
+			if (optionsArray.includes(id)) {
+				choices.push({id: id, label: label});
+			}
 		}
-	};
-	return choices;
+	}
+	return choices.length > 0 ? choices : [{ id: '', label: 'Default' }];
 };
 
 const array2choices = (array, mapping) => {
-	const choices = array?.map((e) => {
+	if (!Array.isArray(array) || array.length === 0) {
+		return [{ id: '', label: 'Default' }];
+	}
+	const choices = array.map((e) => {
 		return {id: e, label: mapping ? mapping(e) : e};
 	});
-	return choices;
+	return choices.length > 0 ? choices : [{ id: '', label: 'Default' }];
 };
 
-module.exports = {DANTE_CONST, object2choices, object2PartialChoices, array2choices};
+const ensureChoices = (choices, defaultItem = { id: 0, label: 'None' }) => {
+	if (Array.isArray(choices) && choices.length > 0) {
+		return choices;
+	}
+	return [defaultItem];
+};
+
+module.exports = {DANTE_CONST, object2choices, object2PartialChoices, array2choices, ensureChoices};

@@ -1,11 +1,102 @@
 const { combineRgb } = require('@companion-module/base');
 const { Regex } = require('@companion-module/base');
 const { render1ChMeter, render4ChMeter, byteToDbfs } = require('./utils/meter-graphics');
+const { ensureChoices } = require('./const');
 
 module.exports = {
 	initFeedbacks: function () {
 		let self = this;
 		let feedbacks = {};
+
+		const defaultDeviceChoices = ensureChoices(self.devicesChoices, { id: '', label: 'Searching for devices...' });
+
+		const parseVar = async (context, val) => {
+			if (val === null || val === undefined) return '';
+			const raw = typeof val === 'object' && 'value' in val ? val.value : val;
+			if (typeof raw !== 'string') return raw;
+			if (typeof context?.parseVariablesInString === 'function') {
+				try {
+					return await context.parseVariablesInString(raw);
+				} catch (e) {
+					return raw;
+				}
+			}
+			return raw;
+		};
+
+		const getDeviceRxChoices = (ip, deviceName) => {
+			if (self.rxChannelsChoices[deviceName]?.length > 1) {
+				return self.rxChannelsChoices[deviceName];
+			}
+			const dev = self.devicesData[ip];
+			if (dev?.rx) {
+				const numKeys = Object.keys(dev.rx).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+				const count = Math.max(dev.rx.count || 0, numKeys.length > 0 ? Math.max(...numKeys) : 0);
+				if (count > 0) {
+					const list = [{ id: 0, label: 'None' }, { id: '', label: 'None' }];
+					const seenIds = new Set([0, '']);
+					for (let i = 1; i <= count; i++) {
+						const ch = dev.rx[i];
+						const name = ch?.friendlyName || ch?.name;
+						const indexString = i.toString().padStart(2, '0');
+						const label = (name && name !== String(i) && name !== indexString) ? `${i}: ${name}` : `Channel ${i}`;
+						list.push({ id: i, label });
+						seenIds.add(i);
+						if (!seenIds.has(String(i))) {
+							list.push({ id: String(i), label });
+							seenIds.add(String(i));
+						}
+					}
+					return list;
+				}
+			}
+			if (self.rxChannelsChoices[deviceName]?.length > 0) {
+				return self.rxChannelsChoices[deviceName];
+			}
+			const fallback = [{ id: 0, label: 'None' }, { id: '', label: 'None' }];
+			for (let i = 1; i <= 64; i++) {
+				fallback.push({ id: i, label: `Channel ${i}` });
+				fallback.push({ id: String(i), label: `Channel ${i}` });
+			}
+			return fallback;
+		};
+
+		const getDeviceTxChoices = (ip, deviceName) => {
+			if (self.txChannelsChoices[deviceName]?.length > 1) {
+				return self.txChannelsChoices[deviceName];
+			}
+			const dev = self.devicesData[ip];
+			if (dev?.tx) {
+				const numKeys = Object.keys(dev.tx).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+				const count = Math.max(dev.tx.count || 0, numKeys.length > 0 ? Math.max(...numKeys) : 0);
+				if (count > 0) {
+					const list = [{ id: 0, label: 'None' }, { id: '', label: 'None' }];
+					const seenIds = new Set([0, '']);
+					for (let i = 1; i <= count; i++) {
+						const ch = dev.tx[i];
+						const name = self.getChannelSubscriptionName(ch);
+						const indexString = i.toString().padStart(2, '0');
+						const label = (name && name !== String(i) && name !== indexString) ? `${i}: ${name}` : `Channel ${i}`;
+						list.push({ id: i, label });
+						seenIds.add(i);
+						if (!seenIds.has(String(i))) {
+							list.push({ id: String(i), label });
+							seenIds.add(String(i));
+						}
+					}
+					return list;
+				}
+			}
+			if (self.txChannelsChoices[deviceName]?.length > 0) {
+				return self.txChannelsChoices[deviceName];
+			}
+			const fallback = [{ id: 0, label: 'None' }, { id: '', label: 'None' }];
+			for (let i = 1; i <= 64; i++) {
+				fallback.push({ id: i, label: `Channel ${i}` });
+				fallback.push({ id: String(i), label: `Channel ${i}` });
+			}
+			return fallback;
+		};
 
 		const foregroundColor = combineRgb(255, 255, 255) // White
 		const backgroundColorRed = combineRgb(255, 0, 0) // Red
@@ -24,7 +115,9 @@ module.exports = {
 					type: 'dropdown',
 					label: 'Destination Device',
 					id: 'destinationDevice',
-					choices: self.devicesChoices
+					choices: defaultDeviceChoices,
+					default: defaultDeviceChoices[0]?.id || '',
+					disableAutoExpression: true
 				}		
 			],
 			callback: (feedback) => {
@@ -33,26 +126,33 @@ module.exports = {
 					const destChanId = opt['destinationChannel_' + opt.destinationDevice];
 					let destinationChannel = self.devicesData[opt.destinationDevice].rx[destChanId] || self.findRxChannelByName(opt.destinationDevice, destChanId);
 					const selectedSourceChannel = opt['sourceChannel_'+opt.sourceDevice];
-					const sourceChannel = self.devicesData[opt.sourceDevice]?.tx?.[selectedSourceChannel] || self.findTxChannelByName(opt.sourceDevice, selectedSourceChannel);
-					const normalizeName = (name) => String(name ?? '').trim().toLowerCase();
-					const destinationSourceChannelName = normalizeName(destinationChannel?.sourceChannel);
-					const sourceChannelCandidates = [selectedSourceChannel, self.getChannelSubscriptionName(sourceChannel), sourceChannel?.name, sourceChannel?.friendlyName]
-						.filter(Boolean)
-						.map((name) => normalizeName(name));
-					if (sourceChannel?.number != undefined) {
-						const number = parseInt(sourceChannel.number, 10);
-						if (!isNaN(number)) {
-							sourceChannelCandidates.push(String(number), String(number).padStart(2, '0'));
+					let sourceChannel = self.devicesData[opt.sourceDevice]?.tx?.[selectedSourceChannel] || self.findTxChannelByName(opt.sourceDevice, selectedSourceChannel);
+					
+					const norm = (s) => String(s ?? '').trim().toLowerCase();
+					const subChannel = norm(destinationChannel?.sourceChannel);
+					const candidateNames = [
+						selectedSourceChannel,
+						self.getChannelSubscriptionName(sourceChannel),
+						sourceChannel?.name,
+						sourceChannel?.friendlyName
+					].filter(Boolean).map(s => norm(s));
+					if (sourceChannel?.number != null) {
+						const num = parseInt(sourceChannel.number, 10);
+						if (!isNaN(num)) {
+							candidateNames.push(String(num), String(num).padStart(2, '0'));
 						}
 					}
-					const sourceChannelMatches = sourceChannelCandidates.includes(destinationSourceChannelName);
-					const destinationSourceDeviceName = normalizeName(destinationChannel?.sourceDevice);
-					const selectedSourceDeviceName = normalizeName(self.devicesData[opt.sourceDevice]?.name);
-					const sourceDeviceMatches = destinationSourceDeviceName == selectedSourceDeviceName ||
-						(destinationSourceDeviceName == '.' && opt.destinationDevice == opt.sourceDevice);
-					const subscriptionOk = ([9, 10, 14].includes(destinationChannel?.subscriptionStatus));
-					return sourceDeviceMatches && sourceChannelMatches && subscriptionOk;
-				}	
+					const isRightChannel = candidateNames.includes(subChannel);
+					
+					const subDevice = norm(destinationChannel?.sourceDevice);
+					const srcDevice = norm(self.devicesData[opt.sourceDevice]?.name);
+					const isRightDevice = (subDevice == srcDevice || (subDevice == '.' && opt.destinationDevice == opt.sourceDevice));
+					const isConnected = [9, 10, 14].includes(destinationChannel?.subscriptionStatus);
+
+					if (isRightDevice && isRightChannel && isConnected) {
+						return true;
+					}
+				}
 			},
 		}
 		
@@ -62,9 +162,8 @@ module.exports = {
 				type: 'dropdown',
 				label: 'Destination channel',
 				id: 'destinationChannel_'+ ip,
-				choices: this.rxChannelsChoices[device.name],
-				isVisibleData : ip,
-				isVisible: (options, deviceIp) => { return (options.destinationDevice == deviceIp);}
+				choices: getDeviceRxChoices(ip, device.name),
+				isVisibleExpression: `$(options:destinationDevice) == '${ip}'`
 			}
 			feedbacks.routing_bg.options.push(nameOption);
 		}
@@ -73,7 +172,9 @@ module.exports = {
 					type: 'dropdown',
 					label: 'Source Device',
 					id: 'sourceDevice',
-					choices: this.devicesChoices
+					choices: defaultDeviceChoices,
+					default: defaultDeviceChoices[0]?.id || '',
+					disableAutoExpression: true
 				})
 	
 		for (const [ip, device] of Object.entries(self.devicesData)) {
@@ -81,9 +182,8 @@ module.exports = {
 				type: 'dropdown',
 				label: 'Source channel',
 				id: 'sourceChannel_'+ ip,
-				choices: this.txChannelsChoices[device.name],
-				isVisibleData : ip,
-				isVisible: (options, deviceIp) => { return (options.sourceDevice == deviceIp);}
+				choices: getDeviceTxChoices(ip, device.name),
+				isVisibleExpression: `$(options:sourceDevice) == '${ip}'`
 			}
 			feedbacks.routing_bg.options.push(nameOption);
 		}	
@@ -130,10 +230,10 @@ module.exports = {
 		],
 		callback: async function (feedback, context) {
 			const opt = feedback.options;
-			const sourceChannelName = await context.parseVariablesInString(opt.sourceChannelName);
-			const sourceDeviceName = await context.parseVariablesInString(opt.sourceDeviceName);
-			const destinationChannelId = await context.parseVariablesInString(opt.destinationChannelId);
-			const destinationDeviceId = await context.parseVariablesInString(opt.destinationDeviceId);
+			const sourceChannelName = await parseVar(context, opt.sourceChannelName);
+			const sourceDeviceName = await parseVar(context, opt.sourceDeviceName);
+			const destinationChannelId = await parseVar(context, opt.destinationChannelId);
+			const destinationDeviceId = await parseVar(context, opt.destinationDeviceId);
 
 			// Check if destinationDeviceId is an IP or a name
 			const IP = RegExp(Regex.IP.slice(1,-1));
@@ -182,7 +282,9 @@ module.exports = {
 				type: 'dropdown',
 				label: 'Destination Device',
 				id: 'destinationDevice',
-				choices: self.devicesChoices
+				choices: defaultDeviceChoices,
+				default: defaultDeviceChoices[0]?.id || '',
+				disableAutoExpression: true
 			}
 		],
 		callback: (feedback) => {
@@ -206,9 +308,8 @@ module.exports = {
 			type: 'dropdown',
 			label: 'Destination channel',
 			id: 'destinationChannel_' + ip,
-			choices: self.rxChannelsChoices[device.name],
-			isVisibleData: ip,
-			isVisible: (options, deviceIp) => options.destinationDevice == deviceIp
+			choices: getDeviceRxChoices(ip, device.name),
+			isVisibleExpression: `$(options:destinationDevice) == '${ip}'`
 		});
 	}
 
@@ -238,8 +339,8 @@ module.exports = {
 		],
 		callback: async (feedback, context) => {
 			if (!self.selectedDestination) return false;
-			const dev = await context.parseVariablesInString(feedback.options.destinationDevice);
-			const chan = await context.parseVariablesInString(feedback.options.destinationChannel);
+			const dev = await parseVar(context, feedback.options.destinationDevice);
+			const chan = await parseVar(context, feedback.options.destinationChannel);
 			const devMatch = (self.selectedDestination.device === dev ||
 				self.findDeviceIpByName(self.selectedDestination.device) === dev ||
 				self.findDeviceIpByName(dev) === self.selectedDestination.device);
@@ -261,51 +362,46 @@ module.exports = {
 				type: 'dropdown',
 				label: 'Source Device',
 				id: 'sourceDevice',
-				choices: self.devicesChoices
+				choices: defaultDeviceChoices,
+				default: defaultDeviceChoices[0]?.id || '',
+				disableAutoExpression: true
 			}
 		],
 		callback: (feedback) => {
 			if (!self.selectedDestination) return false;
 			const opt = feedback.options;
-			const selectedSourceChannel = opt['sourceChannel_' + opt.sourceDevice];
-			
-			const IP = RegExp(Regex.IP.slice(1, -1));
+			const IP = RegExp(Regex.IP.slice(1,-1));
 			const destIp = IP.test(self.selectedDestination.device) ? self.selectedDestination.device : self.findDeviceIpByName(self.selectedDestination.device);
 			if (!destIp || !self.devicesData[destIp]?.rx) return false;
 
 			const destChan = self.findRxChannelByName(destIp, self.selectedDestination.channel) ?? self.devicesData[destIp].rx[self.selectedDestination.channel];
 			if (!destChan) return false;
 
-			const sourceChannel = self.devicesData[opt.sourceDevice]?.tx?.[selectedSourceChannel] || self.findTxChannelByName(opt.sourceDevice, selectedSourceChannel);
-			const normalizeName = (name) => String(name ?? '').trim().toLowerCase();
-			const destinationSourceChannelName = normalizeName(destChan?.sourceChannel);
-			const sourceChannelCandidates = [selectedSourceChannel, self.getChannelSubscriptionName(sourceChannel), sourceChannel?.name, sourceChannel?.friendlyName]
-				.filter(Boolean)
-				.map((name) => normalizeName(name));
-			if (sourceChannel?.number != undefined) {
-				const num = parseInt(sourceChannel.number, 10);
-				if (!isNaN(num)) {
-					sourceChannelCandidates.push(String(num), String(num).padStart(2, '0'));
-				}
-			}
+			const currentSourceDevice = destChan.connectedTo?.device;
+			const currentSourceChannel = destChan.connectedTo?.channel;
+			if (!currentSourceDevice || !currentSourceChannel) return false;
 
-			const sourceMatches = sourceChannelCandidates.includes(destinationSourceChannelName);
-			const destDevName = normalizeName(destChan?.sourceDevice);
-			const srcDevName = normalizeName(self.devicesData[opt.sourceDevice]?.name);
-			const deviceMatches = destDevName === srcDevName || (destDevName === '.' && destIp === opt.sourceDevice);
-			const subscriptionOk = ([9, 10, 14].includes(destChan?.subscriptionStatus));
+			const expectedSourceDevice = opt.sourceDevice;
+			const expectedSourceDeviceIp = IP.test(expectedSourceDevice) ? expectedSourceDevice : self.findDeviceIpByName(expectedSourceDevice);
+			const currentSourceDeviceIp = IP.test(currentSourceDevice) ? currentSourceDevice : self.findDeviceIpByName(currentSourceDevice);
 
-			return deviceMatches && sourceMatches && subscriptionOk;
+			const deviceMatches = expectedSourceDevice === currentSourceDevice ||
+				(expectedSourceDeviceIp && currentSourceDeviceIp && expectedSourceDeviceIp === currentSourceDeviceIp);
+			if (!deviceMatches) return false;
+
+			const expectedSourceChannel = opt['sourceChannel_' + opt.sourceDevice];
+			return String(currentSourceChannel) === String(expectedSourceChannel);
 		}
 	};
 	for (const [ip, device] of Object.entries(self.devicesData)) {
+		const txChoices = getDeviceTxChoices(ip, device.name);
 		feedbacks.source_routed_to_selected_destination.options.push({
 			type: 'dropdown',
 			label: 'Source channel',
 			id: 'sourceChannel_' + ip,
-			choices: self.txChannelsChoices[device.name],
-			isVisibleData: ip,
-			isVisible: (options, deviceIp) => options.sourceDevice == deviceIp
+			choices: txChoices,
+			default: txChoices[1]?.id ?? txChoices[0]?.id ?? 0,
+			isVisibleExpression: `$(options:sourceDevice) == '${ip}'`
 		});
 	}
 
@@ -322,7 +418,9 @@ module.exports = {
 				type: 'dropdown',
 				label: 'Destination Device',
 				id: 'destinationDevice',
-				choices: self.devicesChoices
+				choices: defaultDeviceChoices,
+				default: defaultDeviceChoices[0]?.id || '',
+				disableAutoExpression: true
 			},
 			{
 				type: 'dropdown',
@@ -370,13 +468,14 @@ module.exports = {
 		}
 	};
 	for (const [ip, device] of Object.entries(self.devicesData)) {
+		const rxChoices = getDeviceRxChoices(ip, device.name);
 		feedbacks.subscription_status.options.push({
 			type: 'dropdown',
 			label: 'Destination channel',
 			id: 'destinationChannel_' + ip,
-			choices: self.rxChannelsChoices[device.name],
-			isVisibleData: ip,
-			isVisible: (options, deviceIp) => options.destinationDevice == deviceIp
+			choices: rxChoices,
+			default: rxChoices[0]?.id ?? 0,
+			isVisibleExpression: `$(options:destinationDevice) == '${ip}'`
 		});
 	}
 
@@ -422,17 +521,21 @@ module.exports = {
 		}
 	};
 
+	const getOpt = (v, def = undefined) => (v && typeof v === 'object' && 'value' in v ? (v.value !== undefined ? v.value : def) : (v !== undefined ? v : def));
+
 	feedbacks['metering_1ch'] = {
 		type: 'advanced',
 		name: 'Audio Meter (1-Channel)',
 		description: 'Displays a live audio meter bar and numeric peak dBFS readout for a single Dante channel',
+		affectedProperties: ['png64', 'imageBuffer', 'text', 'size', 'color', 'alignment'],
 		options: [
 			{
 				type: 'dropdown',
 				label: 'Device',
 				id: 'device',
-				choices: self.devicesChoices,
-				default: self.devicesChoices?.[0]?.id || ''
+				choices: defaultDeviceChoices,
+				default: defaultDeviceChoices[0]?.id || '',
+				disableAutoExpression: true
 			},
 			{
 				type: 'dropdown',
@@ -465,22 +568,16 @@ module.exports = {
 				]
 			}
 		],
-		subscribe: (feedback) => {
-			if (feedback.options?.device) {
-				self.subscribeMetering?.(feedback.options.device);
-			}
-		},
-		unsubscribe: (feedback) => {
-			if (feedback.options?.device) {
-				self.unsubscribeMetering?.(feedback.options.device);
-			}
-		},
 		callback: (feedback) => {
 			const opt = feedback.options;
-			if (!opt?.device) return {};
-			const dev = self.devicesData[opt.device];
-			const direction = opt.direction || 'rx';
-			const chNum = parseInt(opt.channelNumber, 10) || 1;
+			const devInput = getOpt(opt?.device) || self.devicesChoices?.[0]?.id;
+			if (!devInput) return {};
+			const devIp = self.findDeviceIpByName(devInput) || devInput;
+			self.subscribeMetering?.(devIp);
+			const dev = self.devicesData[devIp];
+			const direction = getOpt(opt?.direction, 'rx');
+			const chNum = parseInt(getOpt(opt?.channelNumber, 1), 10) || 1;
+			const displayMode = getOpt(opt?.displayMode, 'bar_text');
 
 			const chData = dev?.metering?.[direction]?.[chNum];
 			const peakByte = chData?.peak !== undefined ? chData.peak : 254;
@@ -489,7 +586,7 @@ module.exports = {
 			const res = render1ChMeter({
 				peakByte,
 				peakHoldByte,
-				displayMode: opt.displayMode
+				displayMode: displayMode
 			});
 
 			let channelName = '';
@@ -501,16 +598,17 @@ module.exports = {
 			}
 
 			let displayText = '';
-			if (opt.displayMode !== 'bar_only') {
+			if (displayMode !== 'bar_only') {
 				displayText = `${channelName}\n${res.readoutText}`;
 			}
 
 			return {
+				png64: res.png64,
 				imageBuffer: res.imageBuffer,
-				imageBufferEncoding: { pixelFormat: 'RGBA' },
-				imageBufferPosition: { x: 0, y: 0, width: 72, height: 72 },
+				imageBufferEncoding: res.imageBufferEncoding,
+				imageBufferPosition: res.imageBufferPosition,
 				text: displayText,
-				size: 10,
+				size: '14',
 				color: res.isClip ? combineRgb(255, 60, 60) : combineRgb(255, 255, 255),
 				alignment: 'right:center'
 			};
@@ -521,13 +619,15 @@ module.exports = {
 		type: 'advanced',
 		name: 'Audio Meter Bridge (4-Channel)',
 		description: 'Displays 4 side-by-side live audio meter bars on a single button',
+		affectedProperties: ['png64', 'imageBuffer', 'text', 'size', 'color', 'alignment'],
 		options: [
 			{
 				type: 'dropdown',
 				label: 'Device',
 				id: 'device',
-				choices: self.devicesChoices,
-				default: self.devicesChoices?.[0]?.id || ''
+				choices: defaultDeviceChoices,
+				default: defaultDeviceChoices[0]?.id || '',
+				disableAutoExpression: true
 			},
 			{
 				type: 'dropdown',
@@ -564,22 +664,15 @@ module.exports = {
 				]
 			}
 		],
-		subscribe: (feedback) => {
-			if (feedback.options?.device) {
-				self.subscribeMetering?.(feedback.options.device);
-			}
-		},
-		unsubscribe: (feedback) => {
-			if (feedback.options?.device) {
-				self.unsubscribeMetering?.(feedback.options.device);
-			}
-		},
 		callback: (feedback) => {
 			const opt = feedback.options;
-			if (!opt?.device) return {};
-			const dev = self.devicesData[opt.device];
-			const direction = opt.direction || 'rx';
-			const startCh = parseInt(opt.channelBank, 10) || 1;
+			const devInput = getOpt(opt?.device) || self.devicesChoices?.[0]?.id;
+			if (!devInput) return {};
+			const devIp = self.findDeviceIpByName(devInput) || devInput;
+			self.subscribeMetering?.(devIp);
+			const dev = self.devicesData[devIp];
+			const direction = getOpt(opt?.direction, 'rx');
+			const startCh = parseInt(getOpt(opt?.channelBank, 1), 10) || 1;
 
 			const channelsData = [];
 			for (let i = 0; i < 4; i++) {
@@ -595,11 +688,12 @@ module.exports = {
 			const labelText = `${startCh}  ${startCh + 1}  ${startCh + 2}  ${startCh + 3}`;
 
 			return {
+				png64: res.png64,
 				imageBuffer: res.imageBuffer,
-				imageBufferEncoding: { pixelFormat: 'RGBA' },
-				imageBufferPosition: { x: 0, y: 0, width: 72, height: 72 },
+				imageBufferEncoding: res.imageBufferEncoding,
+				imageBufferPosition: res.imageBufferPosition,
 				text: labelText,
-				size: 9,
+				size: '9',
 				color: combineRgb(200, 200, 200),
 				alignment: 'center:bottom'
 			};

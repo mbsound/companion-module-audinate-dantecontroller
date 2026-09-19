@@ -47,7 +47,8 @@ module.exports = {
 				id: 'ip',
 				tooltip: 'Choose network card and IP address bound to Dante Controller.',
 				width: 12,
-				choices: self.nicChoices
+				choices: self.nicChoices,
+				allowCustom: true
 			},
 
 			{
