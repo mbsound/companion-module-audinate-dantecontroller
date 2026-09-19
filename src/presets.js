@@ -16,7 +16,8 @@ module.exports = {
 
 		// General Router Controls
 		presets.push({
-			type: 'button',
+			id: 'router_clear_selected_route',
+			type: 'simple',
 			category: 'Router: Controls',
 			name: 'Clear Selected Route',
 			style: {
@@ -40,7 +41,8 @@ module.exports = {
 		});
 
 		presets.push({
-			type: 'button',
+			id: 'router_refresh_network_devices',
+			type: 'simple',
 			category: 'Router: Controls',
 			name: 'Refresh Network Devices',
 			style: {
@@ -64,7 +66,8 @@ module.exports = {
 		});
 
 		presets.push({
-			type: 'button',
+			id: 'router_clock_master_status',
+			type: 'simple',
 			category: 'Router: Controls',
 			name: 'Clock Master & Status',
 			style: {
@@ -133,7 +136,8 @@ module.exports = {
 				options['destinationChannel_' + ip] = chNum;
 
 				presets.push({
-					type: 'button',
+					id: 'dest_' + ip.replace(/[^a-zA-Z0-9_-]/g, '_') + '_' + chNum,
+					type: 'simple',
 					category: `Destinations: ${devName}`,
 					name: `${devName} - ${chLabel}`,
 					style: {
@@ -146,7 +150,7 @@ module.exports = {
 						{
 							down: [
 								{
-									actionId: 'selectDestinationDropDown',
+									actionId: 'selectDestination',
 									options: options
 								}
 							],
@@ -202,7 +206,8 @@ module.exports = {
 				options['sourceChannel_' + ip] = chNum;
 
 				presets.push({
-					type: 'button',
+					id: 'src_' + ip.replace(/[^a-zA-Z0-9_-]/g, '_') + '_' + chNum,
+					type: 'simple',
 					category: `Sources: ${devName}`,
 					name: `${devName} - ${chLabel}`,
 					style: {
@@ -215,7 +220,7 @@ module.exports = {
 						{
 							down: [
 								{
-									actionId: 'routeSourceToSelectedDestinationDropDown',
+									actionId: 'routeSourceToSelectedDestination',
 									options: options
 								}
 							],
@@ -238,11 +243,12 @@ module.exports = {
 
 		// Audio Metering Presets
 		presets.push({
-			type: 'button',
+			id: 'metering_1ch',
+			type: 'simple',
 			category: 'Audio Metering',
 			name: '1-Channel Audio Meter',
 			style: {
-				text: 'METER\nCH 1',
+				text: '',
 				size: '14',
 				color: colorWhite,
 				bgcolor: colorDarkGrey,
@@ -262,7 +268,8 @@ module.exports = {
 		});
 
 		presets.push({
-			type: 'button',
+			id: 'metering_4ch',
+			type: 'simple',
 			category: 'Audio Metering',
 			name: '4-Channel Audio Meter Bridge (1-4)',
 			style: {
@@ -284,6 +291,35 @@ module.exports = {
 			]
 		});
 
-		self.setPresetDefinitions(presets);
+		const structure = [];
+		const structureMap = {};
+		const presetDefs = {};
+
+		for (let i = 0; i < presets.length; i++) {
+			const p = presets[i];
+			const cat = p.category || 'General';
+			const catId = cat.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+			if (!structureMap[catId]) {
+				const section = {
+					id: catId,
+					name: cat,
+					definitions: []
+				};
+				structureMap[catId] = section;
+				structure.push(section);
+			}
+			const presetId = p.id || `preset_${catId}_${i}`;
+			structureMap[catId].definitions.push(presetId);
+
+			presetDefs[presetId] = {
+				type: 'simple',
+				name: p.name,
+				style: p.style,
+				steps: p.steps || [],
+				feedbacks: p.feedbacks || []
+			};
+		}
+
+		self.setPresetDefinitions(structure, presetDefs);
 	}
 }

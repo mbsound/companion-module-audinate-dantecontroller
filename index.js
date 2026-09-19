@@ -1,4 +1,4 @@
-const { InstanceBase, InstanceStatus, Regex, runEntrypoint } = require('@companion-module/base')
+const { InstanceBase, InstanceStatus, Regex } = require('@companion-module/base')
 const UpgradeScripts = require('./src/upgrades')
 
 const config = require('./src/config')
@@ -8,6 +8,7 @@ const variables = require('./src/variables')
 const presets = require('./src/presets')
 
 const api = require('./src/api')
+const { loadCache } = require('./src/cache')
 
 class danteInstance extends InstanceBase {
 	constructor(internal) {
@@ -23,6 +24,16 @@ class danteInstance extends InstanceBase {
 			...api
 		})
 
+		const cached = loadCache();
+		this.devicesChoices = (cached && Array.isArray(cached.devicesChoices) && cached.devicesChoices.length > 0)
+			? cached.devicesChoices
+			: [];
+		this.txChannelsChoices = (cached && cached.txChannelsChoices && typeof cached.txChannelsChoices === 'object')
+			? cached.txChannelsChoices
+			: {};
+		this.rxChannelsChoices = (cached && cached.rxChannelsChoices && typeof cached.rxChannelsChoices === 'object')
+			? cached.rxChannelsChoices
+			: {};
 
 		this.INTERVAL = null; //used to poll the clock every second
 		this.CONNECTED = false; //used for friendly notifying of the user that we have not received data yet
@@ -75,9 +86,7 @@ class danteInstance extends InstanceBase {
 	}
 
 	async init(config) {
-		this.configUpdated(config)//.catch((error) => {
-//			this.log('error', 'Error initiating the module');
-//		})
+		this.configUpdated(config)
 	}
 
 	async configUpdated(config) {
@@ -97,4 +106,5 @@ class danteInstance extends InstanceBase {
 	}
 }
 
-runEntrypoint(danteInstance, UpgradeScripts);
+module.exports = danteInstance
+module.exports.UpgradeScripts = UpgradeScripts
