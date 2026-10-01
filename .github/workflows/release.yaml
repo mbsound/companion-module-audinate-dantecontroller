@@ -1,0 +1,51 @@
+name: Release
+
+# Push a tag matching package.json's version (e.g. v1.2.0-EXPERIMENTAL) to build,
+# test and publish a GitHub release with the importable .tgz attached.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: corepack enable
+      - run: yarn install --frozen-lockfile
+
+      - name: Check tag matches package.json version
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - run: yarn run test
+      - run: yarn run check
+      - run: yarn run build
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PACKAGE="audinate-dantecontroller-$VERSION.tgz"
+          test -f "$PACKAGE"
+          PRERELEASE=""
+          case "$VERSION" in *-*) PRERELEASE="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" "$PACKAGE" \
+            --title "$VERSION" \
+            --generate-notes \
+            $PRERELEASE \
+            --notes "Import \`$PACKAGE\` in Companion: Modules > Import module package."

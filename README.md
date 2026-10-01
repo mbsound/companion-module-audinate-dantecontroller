@@ -98,7 +98,7 @@ Upstream had an empty preset file. This fork dynamically generates Companion but
 * **Sources Grid**: One-touch buttons for every discovered Tx channel that route to the active destination with live route tally.
 * **Master Controls**: Pre-configured buttons for "Clear Route" and "Refresh Dante".
 
-### Version 1.2.0 Fixes
+### Version 1.2.0-EXPERIMENTAL Fixes
 * **Meters work without Dante Controller.** The previous metering requests were never answered with a level stream, so meters only worked when Dante Controller was running on the same machine.
 * **Crash-proof packet handling:** a malformed or truncated packet could throw inside a socket handler and crash the module process. Handlers are now guarded and buffer reads are bounds-checked.
 * **Channel lists:** Rx/Tx channel parsing no longer truncates a device's channel count when channel groups differ. Channel counts are read as 16-bit.
@@ -130,22 +130,28 @@ Upstream had an empty preset file. This fork dynamically generates Companion but
 
 ---
 
-## 4. Local Installation in Bitfocus Companion
+## 4. Installation in Bitfocus Companion
 
-To use this enhanced module in Bitfocus Companion:
+### Pre-built package (recommended)
 
-1. Clone or download this repository:
+1. Download the latest `audinate-dantecontroller-<version>.tgz` from the [Releases page](https://github.com/mbsound/companion-module-audinate-dantecontroller/releases).
+2. In Companion, open the **Modules** page and choose **Import module package**, then select the downloaded `.tgz`.
+3. In the **Connections** tab, add **Audinate Dante Controller** (or switch an existing connection to the imported version).
+4. Select your primary Dante network adapter from the interface dropdown.
+
+Versions are tagged `-EXPERIMENTAL` and published as pre-releases.
+
+### From source
+
+1. Clone this repository and build the package:
    ```bash
    git clone https://github.com/mbsound/companion-module-audinate-dantecontroller.git
    cd companion-module-audinate-dantecontroller
-   npm install
-   npm run build
+   yarn install
+   yarn build
    ```
-2. Open **Bitfocus Companion** in your browser (`http://localhost:8000`).
-3. Navigate to **Settings** → **Developer Modules**.
-4. Add the path to this folder in the **Extra module path** field.
-5. In the **Connections** tab, search for **Audinate Dante Controller** and add the connection.
-6. Select your primary Dante network adapter from the interface dropdown.
+   This writes `audinate-dantecontroller-<version>.tgz`, which you can import as above.
+2. Or, to develop against a live copy: in Companion's launcher settings, set the **Developer modules path** to the folder containing this repository.
 
 ---
 
@@ -166,6 +172,10 @@ npm run build
 
 # Format code
 npm run format
+
+# Publish a release (CI builds, tests and attaches the .tgz)
+git tag v<version from package.json>
+git push origin v<version from package.json>
 ```
 
 ---

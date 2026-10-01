@@ -1,6 +1,6 @@
 {
 	"name": "audinate-dantecontroller",
-	"version": "1.2.0",
+	"version": "1.2.0-EXPERIMENTAL",
 	"main": "index.js",
 	"scripts": {
 		"test": "node --test",
