@@ -24,7 +24,7 @@ class danteInstance extends InstanceBase {
 			...api
 		})
 
-		const cached = loadCache();
+		const cached = loadCache(this.id);
 		this.devicesChoices = (cached && Array.isArray(cached.devicesChoices) && cached.devicesChoices.length > 0)
 			? cached.devicesChoices
 			: [];
@@ -50,13 +50,20 @@ class danteInstance extends InstanceBase {
 	}
 
 	async destroy() {
-		if (this.INTERVAL) {
-			clearInterval(this.INTERVAL);
-			this.INTERVAL = null;
+		this.stopInterval();
+		if (this._updateDataTimer) {
+			clearTimeout(this._updateDataTimer);
+			this._updateDataTimer = null;
 		}
-		if (this.METERING_INTERVAL) {
-			clearInterval(this.METERING_INTERVAL);
-			this.METERING_INTERVAL = null;
+
+		// Tell devices to stop streaming meters to us, then close sockets.
+		this.closeSockets();
+
+		if (this.mdns) {
+			try {
+				this.mdns.destroy();
+			} catch (e) {}
+			this.mdns = null;
 		}
 
 		if (this.devicesData) {
@@ -67,22 +74,8 @@ class danteInstance extends InstanceBase {
 			}
 			this.devicesData = {};
 		}
-		
-		if (this.sockets) {
-			for (const socket of Object.values(this.sockets)) {
-				try {
-					socket.close();
-				} catch (e) {}
-			}
-			this.sockets = {};
-		}
 
-		if (this.mdns) {
-			try {
-				this.mdns.destroy();
-			} catch (e) {}
-			this.mdns = null;
-		}
+		await new Promise((resolve) => setTimeout(resolve, 300));
 	}
 
 	async init(config) {

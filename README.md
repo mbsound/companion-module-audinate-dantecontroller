@@ -63,9 +63,23 @@ This fork introduces native ConMon PTP clock inspection (`MESSAGE_TYPE_CLOCKING_
 * **Global Clock Variables**: `$(dante:clock_grandmaster)`, `$(dante:clock_status)`, `$(dante:clock_grandmaster_ip)`, and `$(dante:clock_grandmaster_uuid)`.
 * **Per-Device Clock Tracking**: `$(dante:<deviceName>_clock_role)` (Leader/Follower/Faulty) and `$(dante:<deviceName>_clock_synced)` (Locked/Syncing/Lost Sync).
 
+### Route Monitor: Alarm When a Tx -> Rx Route Drops
+Watch specific transmitter -> receiver channel routes and trigger feedback when one drops:
+* **Route Monitor feedback** (`route_monitor`): pick a receiver channel and the transmitter channel it should carry (or click **Learn** to take it from the current routing). The route counts as **down** when any of these is true:
+  * the receiver or transmitter goes offline
+  * the channel is unsubscribed or re-routed to a different source
+  * the subscription reports an error (Unresolved, No Connection, link down, ...)
+  * optionally, the audio stays below a silence threshold, e.g. a radio mic that lost its transmitter
+* **Alarm delay**: a problem must last a set time (default 3 s) before alarming, so brief re-resolves don't flash the button. An amber "checking" state shows while that delay runs.
+* **Status text** (`route_monitor_status`, value feedback): the reason as text ("OK", "Transmitter offline", "Wrong source (Mic-Rx / 02)", ...) for button local variables.
+* **Master alarm** (`route_monitor_any_down`) plus variables `route_monitor_status`, `route_monitor_down`, `route_monitor_down_list`.
+* **Ready-made presets**: one monitor button per currently connected subscription, already configured (green / amber / red with the status text).
+* Devices are matched by **name**, so monitors keep working when a device's IP changes. Every drop and recovery is logged.
+
 ### Real-Time Audio Metering Feedbacks (1-Channel & 4-Channel Bridge)
-This fork taps into Dante's native DSP peak metering telemetry (`MESSAGE_TYPE_METERING_STATUS` / opcode `0x00E0` and `MESSAGE_TYPE_METERING_CONTROL` / opcode `0x00E1`), decoding granular audio levels at ~0.5 dB resolution directly on Stream Deck keys:
-* **On-Demand Subscription Management**: Devices are only queried/subscribed when a meter feedback is placed on an active button; when the button is removed, the module automatically tears down the subscription to conserve network bandwidth.
+Live peak levels (~0.5 dB resolution) on Stream Deck keys, streamed directly from each device:
+* **No Dante Controller required**: the module sends each device the same metering subscription Dante Controller uses, identified by this computer's MAC address. It works whether zero or any number of Dante Controllers are running. If UDP 8751 is already in use on this computer, a free port is used instead.
+* **On-Demand Subscription Management**: Devices are only asked to stream meters while a meter feedback (or a route monitor with silence detection) needs them. Streams are stopped about 10 seconds after the last such button is removed, and when the connection is disabled.
 * **1-Channel Audio Meter (`metering_1ch`)**:
   * Segmented vertical meter bar with color grading (Green $\to$ Amber $\to$ Orange $\to$ Red Clip).
   * Real-time numeric peak readout in dBFS (e.g. `-14 dB`, `CLIP`, or `MUTE`) and channel label.
@@ -83,6 +97,18 @@ Upstream had an empty preset file. This fork dynamically generates Companion but
 * **Destinations Grid**: One-touch buttons for every discovered Rx channel with integrated selection and status feedback.
 * **Sources Grid**: One-touch buttons for every discovered Tx channel that route to the active destination with live route tally.
 * **Master Controls**: Pre-configured buttons for "Clear Route" and "Refresh Dante".
+
+### Version 1.2.0 Fixes
+* **Meters work without Dante Controller.** The previous metering requests were never answered with a level stream, so meters only worked when Dante Controller was running on the same machine.
+* **Crash-proof packet handling:** a malformed or truncated packet could throw inside a socket handler and crash the module process. Handlers are now guarded and buffer reads are bounds-checked.
+* **Channel lists:** Rx/Tx channel parsing no longer truncates a device's channel count when channel groups differ. Channel counts are read as 16-bit.
+* **Subscription status:** "connected" now includes self-subscriptions (status 4) and devices that report status 1 with a live flow. Unresolved (status 1) is no longer treated as "pending".
+* **"Source Routed to Selected Destination"** feedback read a field that was never set, so it never turned on. It now uses the real subscription data.
+* **Clock status** is polled automatically. Before, it only updated when the *Refresh Clock Status* action ran. The grandmaster is also found by its MAC address when it doesn't answer clock queries itself.
+* **Less network traffic:** the module previously sent six settings queries to every device every second. Settings now refresh every 5 intervals and version info every 60 (devices also announce changes themselves). Meter subscriptions refresh every 3 s instead of every 200 ms.
+* **Discovery:** device IPs come from mDNS address records, so cached answers relayed by this computer's own mDNS responder can't register a phantom device at this computer's IP.
+* **Privacy:** removed a hardcoded list of site-specific device names and IPs. The device cache moved out of Companion's data folder to a per-connection file in the OS cache folder (`~/Library/Caches/...` on macOS, `%LOCALAPPDATA%` on Windows, `~/.cache` on Linux). On first start, an existing cache from older versions is read once.
+* **Tests:** `npm test` (node:test) covers the protocol, the route monitor and the module's feedbacks against simulated devices.
 
 ### Protocol Hardening & Bug Fixes
 * **Dynamic String Offsets**: Replaced fragile, static byte offsets with dynamic string pool serializers that follow Dante's 10-byte DGCP header format (`_arcp_204_rx_sub_req_alloc_str`).
@@ -129,6 +155,9 @@ To use this enhanced module in Bitfocus Companion:
 # Install dependencies
 npm install
 
+# Run the test suite
+npm test
+
 # Validate manifest and module structure
 npm run check
 
@@ -145,4 +174,5 @@ npm run format
 
 * **License**: MIT
 * Based on original work by Cédric Joder and Chris Ritsen's [`network-audio-controller`](https://github.com/chris-ritsen/network-audio-controller).
+* Metering-subscription and subscription-status details cross-checked against netaudio (public domain).
 * Reverse engineering insights and protocol specifications analyzed from Audinate Dante Controller (`libDanteController`).

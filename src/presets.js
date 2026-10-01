@@ -1,4 +1,5 @@
 const { combineRgb } = require('@companion-module/base');
+const { formatChannelRef, isRxConnected } = require('./route-monitor');
 
 module.exports = {
 	initPresets: function () {
@@ -291,6 +292,79 @@ module.exports = {
 			]
 		});
 
+		// Route Monitor: a master alarm, plus one ready-made monitor per live subscription
+		const colorAmber = combineRgb(255, 170, 0);
+		presets.push({
+			id: 'route_monitor_master',
+			category: 'Route Monitor',
+			name: 'Master alarm (any monitored route down)',
+			style: {
+				text: `ROUTES\n$(${self.label}:route_monitor_status)`,
+				size: 'auto',
+				color: colorWhite,
+				bgcolor: colorGreen,
+			},
+			steps: [],
+			feedbacks: [
+				{
+					feedbackId: 'route_monitor_any_down',
+					options: {},
+					style: { bgcolor: colorRed, color: colorWhite },
+				},
+			],
+		});
+
+		const devicesByName = (name) => Object.values(self.devicesData).find((d) => d?.name === name);
+		for (const device of Object.values(self.devicesData).sort((a, b) => String(a?.name).localeCompare(String(b?.name)))) {
+			if (!device?.name || !device.rx) continue;
+			for (const [num, channel] of Object.entries(device.rx)) {
+				if (isNaN(num) || !channel?.sourceDevice || !channel?.sourceChannel || !isRxConnected(channel)) continue;
+				const txName = channel.sourceDevice === '.' ? device.name : channel.sourceDevice;
+				const txDevice = devicesByName(txName);
+				const txChannel = txDevice
+					? self.findTxChannelByName(Object.keys(self.devicesData).find((ip) => self.devicesData[ip] === txDevice), channel.sourceChannel)
+					: null;
+				const txNumber = txChannel?.number ?? (/^\d+$/.test(channel.sourceChannel) ? parseInt(channel.sourceChannel, 10) : null);
+				if (!txNumber) continue;
+
+				const routeOptions = {
+					rxChannel: formatChannelRef(device.name, Number(num)),
+					txChannel: formatChannelRef(txName, txNumber),
+					graceSeconds: 3,
+					checkSignal: false,
+					silenceThreshold: -60,
+					silenceSeconds: 10,
+				};
+				const rxLabel = channel.friendlyName || channel.name || `Ch ${num}`;
+				presets.push({
+					id: `route_monitor_${device.name}_${num}`.replace(/[^A-Za-z0-9_-]/g, '_'),
+					category: `Route Monitor: ${device.name}`,
+					name: `${rxLabel} <- ${txName} / ${channel.sourceChannel}`,
+					style: {
+						text: `${rxLabel}\n$(local:route)`,
+						size: 'auto',
+						color: colorWhite,
+						bgcolor: colorDarkGrey,
+					},
+					steps: [],
+					feedbacks: [
+						{ feedbackId: 'route_monitor', options: { ...routeOptions, when: 'up' }, style: { bgcolor: colorGreen, color: colorWhite } },
+						{ feedbackId: 'route_monitor', options: { ...routeOptions, when: 'checking' }, style: { bgcolor: colorAmber, color: colorBlack } },
+						{ feedbackId: 'route_monitor', options: { ...routeOptions, when: 'down' }, style: { bgcolor: colorRed, color: colorWhite } },
+					],
+					localVariables: [
+						{
+							variableType: 'feedback',
+							variableName: 'route',
+							headline: 'Route status text',
+							feedbackId: 'route_monitor_status',
+							options: routeOptions,
+						},
+					],
+				});
+			}
+		}
+
 		const structure = [];
 		const structureMap = {};
 		const presetDefs = {};
@@ -316,7 +390,8 @@ module.exports = {
 				name: p.name,
 				style: p.style,
 				steps: p.steps || [],
-				feedbacks: p.feedbacks || []
+				feedbacks: p.feedbacks || [],
+				...(p.localVariables ? { localVariables: p.localVariables } : {})
 			};
 		}
 

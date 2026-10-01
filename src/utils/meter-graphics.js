@@ -68,24 +68,16 @@ function rgbToPngDataUrl(rgbBuffer, width, height) {
 	return 'data:image/png;base64,' + Buffer.concat([sig, ihdr, idat, iend]).toString('base64');
 }
 
-// Dante Byte to dBFS conversion
+// Dante level byte to dBFS: 0 = clip, 1 = 0 dBFS, 2-253 = 0.5 dB steps,
+// 254 = muted / silent, 255 = no reading.
 function byteToDbfs(byteVal) {
 	if (byteVal === undefined || byteVal === null || byteVal >= 254) {
 		return -Infinity;
 	}
-	if (byteVal === 0) {
-		return 0.0; // Clip
-	}
-	if (byteVal === 1) {
+	if (byteVal <= 1) {
 		return 0.0;
 	}
-	if (byteVal <= 121) {
-		return -(byteVal - 1) * 0.5;
-	}
-	if (byteVal <= 253) {
-		return -60.0 - (byteVal - 121);
-	}
-	return -Infinity;
+	return -(byteVal - 1) / 2;
 }
 
 // Convert dBFS (-60 dBFS to 0 dBFS) to a normalized height percent (0.0 to 1.0)

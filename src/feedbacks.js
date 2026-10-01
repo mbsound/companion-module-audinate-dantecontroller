@@ -2,6 +2,7 @@ const { combineRgb } = require('@companion-module/base');
 const { Regex } = require('@companion-module/base');
 const { render1ChMeter, render4ChMeter, byteToDbfs } = require('./utils/meter-graphics');
 const { ensureChoices } = require('./const');
+const { isRxConnected, parseChannelRef, formatChannelRef } = require('./route-monitor');
 
 module.exports = {
 	initFeedbacks: function () {
@@ -147,7 +148,7 @@ module.exports = {
 					const subDevice = norm(destinationChannel?.sourceDevice);
 					const srcDevice = norm(self.devicesData[opt.sourceDevice]?.name);
 					const isRightDevice = (subDevice == srcDevice || (subDevice == '.' && opt.destinationDevice == opt.sourceDevice));
-					const isConnected = [9, 10, 14].includes(destinationChannel?.subscriptionStatus);
+					const isConnected = isRxConnected(destinationChannel);
 
 					if (isRightDevice && isRightChannel && isConnected) {
 						return true;
@@ -263,7 +264,7 @@ module.exports = {
 				const selectedSourceDeviceName = normalizeName(sourceDeviceName);
 				const sourceDeviceMatches = destinationSourceDeviceName == selectedSourceDeviceName ||
 					(destinationSourceDeviceName == '.' && self.devicesData[destinationDeviceIp]?.name == sourceDeviceName);
-				const subscriptionOk = ([9, 10, 14].includes(destinationChannel?.subscriptionStatus));
+				const subscriptionOk = isRxConnected(destinationChannel);
 				return sourceDeviceMatches && sourceChannelMatches && subscriptionOk;
 			}
 		},
@@ -377,20 +378,22 @@ module.exports = {
 			const destChan = self.findRxChannelByName(destIp, self.selectedDestination.channel) ?? self.devicesData[destIp].rx[self.selectedDestination.channel];
 			if (!destChan) return false;
 
-			const currentSourceDevice = destChan.connectedTo?.device;
-			const currentSourceChannel = destChan.connectedTo?.channel;
-			if (!currentSourceDevice || !currentSourceChannel) return false;
+			if (!destChan.sourceDevice || !destChan.sourceChannel || !isRxConnected(destChan)) return false;
+			const currentSourceDevice = destChan.sourceDevice === '.' ? self.devicesData[destIp].name : destChan.sourceDevice;
 
 			const expectedSourceDevice = opt.sourceDevice;
 			const expectedSourceDeviceIp = IP.test(expectedSourceDevice) ? expectedSourceDevice : self.findDeviceIpByName(expectedSourceDevice);
-			const currentSourceDeviceIp = IP.test(currentSourceDevice) ? currentSourceDevice : self.findDeviceIpByName(currentSourceDevice);
+			const currentSourceDeviceIp = self.findDeviceIpByName(currentSourceDevice);
+			if (!expectedSourceDeviceIp || expectedSourceDeviceIp !== currentSourceDeviceIp) return false;
 
-			const deviceMatches = expectedSourceDevice === currentSourceDevice ||
-				(expectedSourceDeviceIp && currentSourceDeviceIp && expectedSourceDeviceIp === currentSourceDeviceIp);
-			if (!deviceMatches) return false;
-
+			// The receiver names the source channel; the option holds its channel number.
 			const expectedSourceChannel = opt['sourceChannel_' + opt.sourceDevice];
-			return String(currentSourceChannel) === String(expectedSourceChannel);
+			const sourceChannel = self.devicesData[expectedSourceDeviceIp]?.tx?.[expectedSourceChannel];
+			const norm = (v) => String(v ?? '').trim().toLowerCase();
+			const aliases = [expectedSourceChannel, String(expectedSourceChannel).padStart(2, '0'), sourceChannel?.name, sourceChannel?.friendlyName]
+				.filter((v) => v !== undefined && v !== null && v !== '')
+				.map(norm);
+			return aliases.includes(norm(destChan.sourceChannel));
 		}
 	};
 	for (const [ip, device] of Object.entries(self.devicesData)) {
@@ -450,11 +453,13 @@ module.exports = {
 			const status = destChan.subscriptionStatus;
 			if (status === undefined || status === 0) return false; // Not subscribed
 
+			const connected = isRxConnected(destChan);
+			const pending = [2, 7, 8].includes(status); // resolved / idle / in progress
 			switch (opt.condition) {
 				case 'ok':
-					return [9, 10, 14].includes(status);
+					return connected;
 				case 'pending':
-					return [1, 8].includes(status);
+					return pending;
 				case 'fanout_limit':
 					return status === 37;
 				case 'clock_error':
@@ -463,7 +468,7 @@ module.exports = {
 					return [16, 17].includes(status);
 				case 'error':
 				default:
-					return ![0, 9, 10, 14].includes(status);
+					return !connected && !pending;
 			}
 		}
 	};
@@ -478,6 +483,189 @@ module.exports = {
 			isVisibleExpression: `$(options:destinationDevice) == '${ip}'`
 		});
 	}
+
+	// ---- Route monitoring: alarm when a specific Tx -> Rx route drops -----------
+
+	// "Device::channel" choices for every known device (live or cached).
+	const routeChoices = (direction) => {
+		const devices = new Map();
+		for (const choice of self.devicesChoices || []) {
+			if (choice?.label) devices.set(String(choice.label).toLowerCase(), { name: choice.label, ip: choice.id });
+		}
+		for (const [ip, dev] of Object.entries(self.devicesData)) {
+			if (dev?.name) devices.set(String(dev.name).toLowerCase(), { name: dev.name, ip });
+		}
+		const choices = [];
+		const sorted = [...devices.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+		for (const { name, ip } of sorted) {
+			const live = self.devicesData[ip]?.[direction];
+			const cached = self[direction + 'ChannelsChoices']?.[name] || [];
+			const liveCount = live ? Math.max(live.count || 0, ...Object.keys(live).map(Number).filter((n) => n > 0)) : 0;
+			const entries = liveCount > 0
+				? Array.from({ length: liveCount }, (_, i) => {
+						const ch = live[i + 1];
+						const label = direction === 'tx' ? self.getChannelSubscriptionName(ch) : ch?.friendlyName || ch?.name;
+						return { n: i + 1, label: label ? `${i + 1}: ${label}` : `Channel ${i + 1}` };
+					})
+				: cached.filter((c) => parseInt(c.id, 10) > 0).map((c) => ({ n: parseInt(c.id, 10), label: c.label }));
+			for (const { n, label } of entries) {
+				choices.push({ id: formatChannelRef(name, n), label: `${name} > ${label}` });
+			}
+		}
+		return choices;
+	};
+
+	const rxRouteChoices = [{ id: '', label: 'Select a receive channel...' }, ...routeChoices('rx')];
+	const txRouteChoices = [{ id: '', label: 'Any source (alarm only if the subscription drops)' }, ...routeChoices('tx')];
+
+	const routeOptions = () => [
+		{
+			type: 'dropdown',
+			label: 'Receiver channel',
+			id: 'rxChannel',
+			choices: rxRouteChoices,
+			default: '',
+			allowCustom: true,
+			minChoicesForSearch: 10,
+			tooltip: 'The receiving device and channel to watch. Custom values use the form DeviceName::ChannelNumber.',
+		},
+		{
+			type: 'dropdown',
+			label: 'Expected transmitter channel',
+			id: 'txChannel',
+			choices: txRouteChoices,
+			default: '',
+			allowCustom: true,
+			minChoicesForSearch: 10,
+			tooltip: 'The source this receiver should be subscribed to. Use "Learn" to fill it in from the current routing.',
+		},
+		{
+			type: 'number',
+			label: 'Alarm after (seconds)',
+			id: 'graceSeconds',
+			default: 3,
+			min: 0,
+			max: 300,
+			tooltip: 'How long a problem must last before it counts, so brief re-resolves do not trigger alarms.',
+		},
+		{
+			type: 'checkbox',
+			label: 'Also alarm on silence',
+			id: 'checkSignal',
+			default: false,
+			disableAutoExpression: true,
+			tooltip: 'Treat the route as down if the audio level stays below the threshold (e.g. a radio mic that lost its transmitter).',
+		},
+		{
+			type: 'number',
+			label: 'Silence below (dBFS)',
+			id: 'silenceThreshold',
+			default: -60,
+			min: -120,
+			max: 0,
+			isVisibleExpression: '$(options:checkSignal)',
+		},
+		{
+			type: 'number',
+			label: 'Silence for (seconds)',
+			id: 'silenceSeconds',
+			default: 10,
+			min: 1,
+			max: 3600,
+			isVisibleExpression: '$(options:checkSignal)',
+		},
+	];
+
+	// Fill in the expected transmitter from the receiver's current subscription.
+	const learnRouteSource = (feedback) => {
+		const rx = parseChannelRef(feedback.options.rxChannel);
+		if (!rx) {
+			self.log('warn', 'Learn: choose a receiver channel first');
+			return undefined;
+		}
+		const rxIp = self.findDeviceIpByName(rx.device);
+		const channel = self.devicesData[rxIp]?.rx?.[rx.channel];
+		if (!channel?.sourceDevice || !channel?.sourceChannel) {
+			self.log('warn', `Learn: ${rx.device} channel ${rx.channel} is not subscribed to anything`);
+			return undefined;
+		}
+		const txName = channel.sourceDevice === '.' ? self.devicesData[rxIp].name : channel.sourceDevice;
+		const txIp = self.findDeviceIpByName(txName);
+		let txNumber = self.findTxChannelByName(txIp ?? txName, channel.sourceChannel)?.number;
+		if (!txNumber && /^\d+$/.test(channel.sourceChannel)) txNumber = parseInt(channel.sourceChannel, 10);
+		if (!txNumber) {
+			self.log('warn', `Learn: could not find channel "${channel.sourceChannel}" on ${txName}`);
+			return undefined;
+		}
+		return { txChannel: formatChannelRef(self.devicesData[txIp]?.name ?? txName, txNumber) };
+	};
+
+	feedbacks['route_monitor'] = {
+		type: 'boolean',
+		name: 'Route Monitor: Tx -> Rx route health',
+		description:
+			'Watch a specific transmitter -> receiver channel route and change style when it drops (receiver or transmitter offline, unsubscribed, wrong source, subscription error, or optionally silence).',
+		defaultStyle: {
+			color: combineRgb(255, 255, 255),
+			bgcolor: combineRgb(200, 0, 0),
+		},
+		options: [
+			...routeOptions(),
+			{
+				type: 'dropdown',
+				label: 'Turn on when',
+				id: 'when',
+				default: 'down',
+				disableAutoExpression: true,
+				choices: [
+					{ id: 'down', label: 'Route is down' },
+					{ id: 'checking', label: 'Problem detected, waiting out the alarm delay' },
+					{ id: 'up', label: 'Route is healthy' },
+				],
+			},
+		],
+		callback: (feedback) => {
+			const result = self.evaluateRouteMonitor(feedback.id, feedback.options);
+			if (!result) return false;
+			switch (feedback.options.when) {
+				case 'up':
+					return result.healthy;
+				case 'checking':
+					return !result.down && !result.healthy;
+				default:
+					return result.down;
+			}
+		},
+		unsubscribe: (feedback) => self.removeRouteMonitor(feedback.id),
+		learn: learnRouteSource,
+	};
+
+	feedbacks['route_monitor_status'] = {
+		type: 'value',
+		name: 'Route Monitor: status text',
+		description:
+			'The current status of a Tx -> Rx route as text ("OK", "Transmitter offline", "Wrong source (...)", ...). Use it as a local variable in button text.',
+		options: routeOptions(),
+		callback: (feedback) => {
+			const result = self.evaluateRouteMonitor(feedback.id, feedback.options);
+			if (!result) return 'Not configured';
+			return result.healthy ? 'OK' : result.reason;
+		},
+		unsubscribe: (feedback) => self.removeRouteMonitor(feedback.id),
+		learn: learnRouteSource,
+	};
+
+	feedbacks['route_monitor_any_down'] = {
+		type: 'boolean',
+		name: 'Route Monitor: any monitored route down',
+		description: 'On when any route watched by a Route Monitor feedback (on any button) is down. Useful as a master alarm.',
+		defaultStyle: {
+			color: combineRgb(255, 255, 255),
+			bgcolor: combineRgb(200, 0, 0),
+		},
+		options: [],
+		callback: () => (self.routeMonitor?.summary().down.length ?? 0) > 0,
+	};
 
 	feedbacks['clock_master_status'] = {
 		type: 'boolean',

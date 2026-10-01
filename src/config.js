@@ -64,7 +64,7 @@ module.exports = {
 				type: 'textinput',
 				id: 'timeoutInterval',
 				label: 'Timeout Interval',
-				tooltip: 'Please enter the time in milliseconds before a device is considered offline. Set to 0 to disable.',
+				tooltip: 'Time in milliseconds without hearing from a device before it is removed from the lists (minimum 15000). Set to 0 to never remove devices. Route monitoring detects offline devices within a few seconds regardless of this setting.',
 				width: 3,
 				default: 3000
 			},

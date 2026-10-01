@@ -1,78 +1,71 @@
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+// Remembers discovered devices and channel names between restarts, so action and
+// feedback dropdowns stay populated while devices are offline. One file per
+// Companion connection, in the operating system's standard cache location.
 
-const FALLBACK_DEVICES = [];
+const fs = require('fs')
+const path = require('path')
+const os = require('os')
 
-function getCachePath() {
-	const homedir = os.homedir() || process.env.HOME || '';
-	const companionDir = path.join(homedir, 'Library', 'Application Support', 'companion');
-	if (fs.existsSync(companionDir)) {
-		return path.join(companionDir, 'dante-devices-cache.json');
+const APP_DIR = 'companion-module-audinate-dantecontroller'
+
+function cacheDir() {
+	const home = os.homedir()
+	if (process.platform === 'darwin') return path.join(home, 'Library', 'Caches', APP_DIR)
+	if (process.platform === 'win32') {
+		return path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), APP_DIR)
 	}
-	return path.join(__dirname, '..', 'dante-devices-cache.json');
+	return path.join(process.env.XDG_CACHE_HOME || path.join(home, '.cache'), APP_DIR)
 }
 
-function loadCache() {
-	let devices = [...FALLBACK_DEVICES];
-	let tx = {};
-	let rx = {};
+function getCachePath(instanceId) {
+	const safeId = String(instanceId || 'default').replace(/[^A-Za-z0-9_-]/g, '_')
+	return path.join(cacheDir(), `devices-${safeId}.json`)
+}
+
+// Where versions up to 1.1.3 kept a single shared cache (read once as a fallback).
+const LEGACY_CACHE = path.join(os.homedir(), 'Library', 'Application Support', 'companion', 'dante-devices-cache.json')
+
+const empty = () => ({ devicesChoices: [], txChannelsChoices: {}, rxChannelsChoices: {} })
+
+function readJson(file) {
+	return JSON.parse(fs.readFileSync(file, 'utf8'))
+}
+
+function loadCache(instanceId) {
 	try {
-		const filePath = getCachePath();
-		if (fs.existsSync(filePath)) {
-			const raw = fs.readFileSync(filePath, 'utf8');
-			const parsed = JSON.parse(raw);
-			if (parsed && typeof parsed === 'object') {
-				if (Array.isArray(parsed.devicesChoices) && parsed.devicesChoices.length > 0) {
-					for (const dev of parsed.devicesChoices) {
-						if (!devices.find((d) => d.id === dev.id)) {
-							devices.push(dev);
-						}
-					}
-				}
-				if (parsed.txChannelsChoices) tx = parsed.txChannelsChoices;
-				if (parsed.rxChannelsChoices) rx = parsed.rxChannelsChoices;
-			}
+		const file = getCachePath(instanceId)
+		const parsed = fs.existsSync(file) ? readJson(file) : fs.existsSync(LEGACY_CACHE) ? readJson(LEGACY_CACHE) : null
+		if (!parsed || typeof parsed !== 'object') return empty()
+		return {
+			devicesChoices: Array.isArray(parsed.devicesChoices)
+				? parsed.devicesChoices.filter((d) => d && d.id && d.label)
+				: [],
+			txChannelsChoices: parsed.txChannelsChoices && typeof parsed.txChannelsChoices === 'object' ? parsed.txChannelsChoices : {},
+			rxChannelsChoices: parsed.rxChannelsChoices && typeof parsed.rxChannelsChoices === 'object' ? parsed.rxChannelsChoices : {},
 		}
 	} catch (e) {
-		// ignore load errors
+		return empty()
 	}
-	devices.sort((a, b) => (a.label || '').localeCompare(b.label || ''));
-	return {
-		devicesChoices: devices,
-		txChannelsChoices: tx,
-		rxChannelsChoices: rx,
-	};
 }
 
-function saveCache(data) {
+/** Merge newly discovered data into the cache (devices that went offline are kept). */
+function saveCache(instanceId, data) {
 	try {
-		const filePath = getCachePath();
-		let existing = loadCache() || {};
-		let mergedDevices = [...(data.devicesChoices || [])];
-		if (Array.isArray(existing.devicesChoices)) {
-			for (const dev of existing.devicesChoices) {
-				if (!mergedDevices.find((d) => d.id === dev.id)) {
-					mergedDevices.push(dev);
-				}
-			}
-		}
-		mergedDevices.sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+		const existing = loadCache(instanceId)
+		const devices = new Map(existing.devicesChoices.map((d) => [d.id, d]))
+		for (const dev of data.devicesChoices || []) devices.set(dev.id, dev)
 
-		const mergedData = {
-			devicesChoices: mergedDevices,
-			txChannelsChoices: { ...(existing.txChannelsChoices || {}), ...(data.txChannelsChoices || {}) },
-			rxChannelsChoices: { ...(existing.rxChannelsChoices || {}), ...(data.rxChannelsChoices || {}) },
-		};
-		fs.writeFileSync(filePath, JSON.stringify(mergedData, null, 2), 'utf8');
+		const merged = {
+			devicesChoices: [...devices.values()].sort((a, b) => String(a.label).localeCompare(String(b.label))),
+			txChannelsChoices: { ...existing.txChannelsChoices, ...(data.txChannelsChoices || {}) },
+			rxChannelsChoices: { ...existing.rxChannelsChoices, ...(data.rxChannelsChoices || {}) },
+		}
+		const file = getCachePath(instanceId)
+		fs.mkdirSync(path.dirname(file), { recursive: true })
+		fs.writeFileSync(file, JSON.stringify(merged, null, 2), 'utf8')
 	} catch (e) {
-		// ignore save errors
+		// The cache is a convenience; failing to write it is not an error.
 	}
 }
 
-module.exports = {
-	FALLBACK_DEVICES,
-	getCachePath,
-	loadCache,
-	saveCache,
-};
+module.exports = { getCachePath, loadCache, saveCache }

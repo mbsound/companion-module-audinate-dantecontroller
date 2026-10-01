@@ -13,6 +13,10 @@ module.exports = {
 		variables['selected_destination_channel'] = { name: 'Selected Destination Channel' };
 		variables['selected_destination_source'] = { name: 'Source Routed to Selected Destination' };
 		variables['selected_destination_status'] = { name: 'Subscription Status of Selected Destination' };
+		variables['route_monitor_status'] = { name: 'Route Monitor: overall status ("All OK", "2 DOWN", ...)' };
+		variables['route_monitor_total'] = { name: 'Route Monitor: number of monitored routes' };
+		variables['route_monitor_down'] = { name: 'Route Monitor: number of routes down' };
+		variables['route_monitor_down_list'] = { name: 'Route Monitor: routes that are down, with reasons' };
 		
 		for (const [ip, device] of Object.entries(self.devicesData)) {
 			variables[device.name + '_ip'] = { name: 'Ip address of ' + device.name };
@@ -32,6 +36,10 @@ module.exports = {
 		}
 			
 		self.setVariableDefinitions(variables);
+		if (self.routeMonitor) {
+			self._routeMonitorVariables = null; // definitions were reset; push values again
+			self.updateRouteMonitorVariables();
+		}
 	},
 
 	checkVariables: function (ipAddress, ...variableTypes) {

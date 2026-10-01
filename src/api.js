@@ -5,8 +5,17 @@ const { networkInterfaces } = require('os');
 const { InstanceStatus, Regex } = require('@companion-module/base')
 const {DANTE_CONST, object2choices} = require("./const");
 const { loadCache, saveCache } = require("./cache");
+const { METERING_PORT, buildMeteringRequest, buildMeteringStop, parseMeteringFrame } = require('./metering');
+const { RouteMonitor, specFromOptions } = require('./route-monitor');
 
 
+
+// A device is "online" if we've heard anything from it this recently.
+const DEVICE_OFFLINE_MS = 8000;
+// Metering streams nobody has looked at for this long are stopped.
+const METERING_IDLE_MS = 10000;
+// Meter subscriptions are refreshed this often (in 100 ms metering ticks).
+const METERING_REFRESH_TICKS = 30;
 
 const compareArrays = (a, b) => {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -24,7 +33,7 @@ const intToBuffer = (number, bytes = 2) => {
     let intBuffer = Buffer.alloc(bytes);
 	switch (bytes) {
 		case 1:
-			intBuffer.writeInt8(Number(safeNumber));
+			intBuffer.writeUInt8(Number(safeNumber) & 0xff);
 			break;
 		case 2:
 		case 3:
@@ -45,9 +54,12 @@ const intToBuffer = (number, bytes = 2) => {
 };
 
 const bufferToInt = (buffer, offset = 0, bytes = 2) => {
+	if (!buffer || offset < 0 || offset + bytes > buffer.length) {
+		return bytes === 8 ? 0n : 0;
+	}
 	switch (bytes) {
 		case 1:
-			return buffer.readInt8(offset);
+			return buffer.readUInt8(offset);
 		case 2:
 			return buffer.readUInt16BE(offset);
 		case 4:
@@ -80,16 +92,13 @@ const parseString = (buffer, startIndex) => {
 //**
 
 const parseChannelCount = (reply) => {
-    const deviceInfo = { tx: {count: reply[13]}, rx :{count:reply[15]} };
-    return deviceInfo;
+    return { tx: {count: bufferToInt(reply, 12)}, rx: {count: bufferToInt(reply, 14)} };
 };
 
 const parseTxFriendlyNames = (reply) => {
 	const deviceInfo = {};
 	deviceInfo.tx = {};
-	let firstChannelGroup;
 	
-	const channelCount = reply[10];
 	const recCount = reply[11];
 	const startIndex = 12;
 
@@ -107,6 +116,7 @@ const parseTxFriendlyNames = (reply) => {
 		// get channel number and byte index of name
 		const nameNumber = bufferToInt(infoBuffer, nameNumberOffset);
 		const nameIndex = bufferToInt(infoBuffer, friendlyNameIndexOffset);
+		if (!nameNumber) continue;
 		
 		// create return object if needed
 		if (deviceInfo.tx[nameNumber] == undefined) {
@@ -124,9 +134,7 @@ const parseTxFriendlyNames = (reply) => {
 const parseTxChannels = (reply) => {
 	const deviceInfo = {};
 	deviceInfo.tx = {};
-	let firstChannelGroup;
 	
-	const channelCount = reply[10];
 	const recCount = reply[11];
 	const startIndex = 12;
 
@@ -144,6 +152,7 @@ const parseTxChannels = (reply) => {
 		// get channel number and byte index of name
 		const nameNumber = bufferToInt(infoBuffer, nameNumberOffset);
 		const nameIndex = bufferToInt(infoBuffer, nameIndexOffset);
+		if (!nameNumber) continue;
 		
 		// create return object if needed
 		if (deviceInfo.tx[nameNumber] == undefined) {
@@ -156,15 +165,9 @@ const parseTxChannels = (reply) => {
 		const channelName = parseString(reply, nameIndex);
 		returnChannel.name = channelName;
 
-		// get sampleRate
+		// get sampleRate (each record points at its channel group's audio metadata)
 		const sampleRateIndex = bufferToInt(infoBuffer, sampleRateOffset);
-		if (i == 0) {
-			firstChannelGroup = sampleRateIndex;
-		} else if (sampleRateIndex != firstChannelGroup) {
-			deviceInfo.tx.count = i;
-			break;
-		}
-		 returnChannel.sampleRate = reply.readUInt32BE(sampleRateIndex);
+		returnChannel.sampleRate = bufferToInt(reply, sampleRateIndex, 4) || undefined;
 	}
     return deviceInfo;
 }
@@ -173,7 +176,6 @@ const parseRxChannels = (reply) => {
 	const deviceInfo = {};
 	deviceInfo.rx = {};
 	
-	const channelCount = reply[10];
 	const recCount = reply[11];
 	const startIndex = 12;
 
@@ -187,7 +189,6 @@ const parseRxChannels = (reply) => {
 	const channelStatusOffset =  12;
 	const subscriptionStatusOffset = 14;
 	
-	let firstChannelGroup = 0;
 	// for each channel
 	for (let i = 0; i < Math.min(recCount,32) ; i++) {
 		// get info chunk of channel
@@ -196,6 +197,7 @@ const parseRxChannels = (reply) => {
 		// get channel number and byte index of name
 		const nameNumber = bufferToInt(infoBuffer, nameNumberOffset);
 		const nameIndex = bufferToInt(infoBuffer, nameIndexOffset);
+		if (!nameNumber) continue;
 		
 		// create return object if needed
 		if (deviceInfo.rx[nameNumber] == undefined) {
@@ -212,24 +214,16 @@ const parseRxChannels = (reply) => {
 		const sourceChannelIndex = bufferToInt(infoBuffer, sourceChannelOffset);
 		const sourceDeviceIndex = bufferToInt(infoBuffer, sourceDeviceOffset);
 		const sampleRateIndex = bufferToInt(infoBuffer, sampleRateOffset);
-		if (i == 0) {
-			firstChannelGroup = sampleRateIndex;
-		} else if (sampleRateIndex != firstChannelGroup) {
-			deviceInfo.rx.count = i;
-			break;
-		}
-		returnChannel.sourceChannel = parseString(reply, sourceChannelIndex);
 		returnChannel.sourceDevice = parseString(reply, sourceDeviceIndex);
+		// a zero channel pointer means "the Tx channel with the same name as this Rx channel"
+		returnChannel.sourceChannel = sourceChannelIndex
+			? parseString(reply, sourceChannelIndex)
+			: (returnChannel.sourceDevice ? channelName : '');
 		returnChannel.channelStatus = bufferToInt(infoBuffer, channelStatusOffset);
 		returnChannel.subscriptionStatus = bufferToInt(infoBuffer, subscriptionStatusOffset);
-		returnChannel.sampleRate = (sampleRateIndex > 0 && sampleRateIndex + 4 <= reply.length) ? reply.readUInt32BE(sampleRateIndex) : undefined; 
+		returnChannel.sampleRate = bufferToInt(reply, sampleRateIndex, 4) || undefined;
 	}
     return deviceInfo;
-}
-
-const parseDeviceInfo = (reply) => {
-	const deviceInfo = {};
-	
 }
 
 const parseDeviceName = (reply) => {
@@ -245,6 +239,7 @@ const parseDeviceSettings = (reply) => {
 	for (let i = 0; i < recCount ; i++) {
 		// get info chunk
 		const infoIndex = startIndex + (infoBufferSize * i);
+		if (infoIndex + infoBufferSize > reply.length) break;
 		const infoBuffer = reply.slice(infoIndex, infoIndex + infoBufferSize);
 		
 		const infoCode = infoBuffer.readUInt16BE(0);
@@ -336,6 +331,21 @@ module.exports = {
 		}
 	},
 	
+	// Wrap a socket message handler so one malformed packet can't crash the module.
+	safeHandler(label, handler) {
+		return (msg, rinfo) => {
+			try {
+				handler.call(this, msg, rinfo);
+			} catch (err) {
+				this.log('debug', `${label}: ignored malformed packet from ${rinfo?.address}: ${err?.message || err}`);
+			}
+		};
+	},
+
+	isDeviceOnline(device, now = Date.now()) {
+		return Boolean(device?.lastSeen) && now - device.lastSeen <= DEVICE_OFFLINE_MS;
+	},
+
 	checkConnections() {
 		for (const service of ['ARC', 'CMC']) {
 			if (!this.activeConnections[service]) {
@@ -366,12 +376,9 @@ module.exports = {
 		this.activeConnections = {};
 		self.updateStatus(InstanceStatus.Connecting);
 		
-		// close existing sockets and mdns if reconfiguring
-		if (this.sockets) {
-			for (const socket of Object.values(this.sockets)) {
-				try { socket.close(); } catch (e) {}
-			}
-		}
+		// close existing sockets and mdns if reconfiguring (tell devices to stop
+		// streaming meters to the old socket first)
+		this.closeSockets();
 		if (this.mdns) {
 			try { this.mdns.destroy(); } catch (e) {}
 			this.mdns = null;
@@ -381,19 +388,21 @@ module.exports = {
 		self.devicesData = {};
 		
 		// create actions and feedback dropdown choices
-		const cached = loadCache();
+		const cached = loadCache(self.id);
 		self.devicesChoices = (cached && Array.isArray(cached.devicesChoices) && cached.devicesChoices.length > 0)
 			? cached.devicesChoices
 			: [];
-		self.log('info', `[CACHE DEBUG] initConnection loaded ${self.devicesChoices.length} devices: ${self.devicesChoices.map(d => d.id).join(',')}`);
 		self.txChannelsChoices = (cached && cached.txChannelsChoices && typeof cached.txChannelsChoices === 'object')
 			? cached.txChannelsChoices
 			: {};
 		self.rxChannelsChoices = (cached && cached.rxChannelsChoices && typeof cached.rxChannelsChoices === 'object')
 			? cached.rxChannelsChoices
 			: {};
-		self.txFriendlyNameRefreshCounter = 0;
 		self.meteringSubscriptions = {};
+		self.lastSeenByName = self.lastSeenByName || {};
+		self.routeMonitor = self.routeMonitor || new RouteMonitor();
+		self.pollTick = 0;
+		self.monitorTick = 0;
 		self.meteringNeedsFeedbackCheck = false;
 		self.meteringTickCounter = 0;
 
@@ -420,7 +429,7 @@ module.exports = {
 		this.sockets.ARC = dgram.createSocket({type: "udp4", reuseAddr: true});
 		const arcSocket = this.sockets.ARC;
 		
-       	arcSocket.on("message", this.parseReply.bind(this));
+       	arcSocket.on("message", this.safeHandler('ARC', this.parseReply));
    		arcSocket.on("error", (error)=>{
 			self.log('error', 'ARC socket: ' + (error?.message || error));
 			self.activeConnections.ARC = false;
@@ -452,6 +461,7 @@ module.exports = {
 			}
 		}
 		self.boundIp = boundIp;
+		self.localIps = new Set(availableIps);
 
 		// bind socket to random port of configured ip address if available
 		if (boundIp) {
@@ -467,7 +477,7 @@ module.exports = {
 		// create Dante settings socket
 		this.sockets.SETTINGS = dgram.createSocket({type: "udp4", reuseAddr: true});
 		const settingSocket = this.sockets.SETTINGS;
-		settingSocket.on("message", this.parseSettingsReply.bind(this));	
+		settingSocket.on("message", this.safeHandler('SETTINGS', this.parseSettingsReply));
 		
   		settingSocket.on("error", (error)=>{
 			self.log('warn', 'Settings socket notice: ' + (error?.message || error));
@@ -498,7 +508,7 @@ module.exports = {
 		// create Dante CMC socket
 		this.sockets.CMC = dgram.createSocket({type: "udp4", reuseAddr: true});
 		const cmcSocket = this.sockets.CMC;
-		cmcSocket.on("message", this.parseCmcReply.bind(this));	
+		cmcSocket.on("message", this.safeHandler('CMC', this.parseCmcReply));
 		
   		cmcSocket.on("error", (error)=>{
 			self.log('error', 'CMC socket: ' + (error?.message || error));
@@ -533,7 +543,7 @@ module.exports = {
 		// create Dante heartbeat socket
 		this.sockets.HEARTBEAT = dgram.createSocket({type: "udp4", reuseAddr: true});
 		const heartbeatSocket = this.sockets.HEARTBEAT;
-		heartbeatSocket.on("message", this.parseHeartbeatReply.bind(this));	
+		heartbeatSocket.on("message", this.safeHandler('HEARTBEAT', this.parseHeartbeatReply));
 		
   		heartbeatSocket.on("error", (error)=>{
 			self.log('warn', 'Heartbeat socket notice: ' + (error?.message || error));
@@ -560,26 +570,32 @@ module.exports = {
 			self.log('warn', 'Heartbeat socket bind notice: ' + (e?.message || e));
 		}
 		
-		// create Dante Metering listener socket (port 8751)
-		try {
-			this.sockets.METERING = dgram.createSocket({type: "udp4", reuseAddr: true});
-			const meteringSocket = this.sockets.METERING;
-			meteringSocket.on("message", this.parseMeteringSocketReply.bind(this));
+		// Metering listener. Bound exclusively so a Dante Controller on this computer
+		// can't take our stream (or we theirs). If 8751 is taken, any free port works:
+		// devices send to whichever port the subscription request names.
+		this.meteringPort = null;
+		const openMeteringSocket = (port) => {
+			const meteringSocket = dgram.createSocket({type: "udp4", reuseAddr: false});
+			this.sockets.METERING = meteringSocket;
+			meteringSocket.on("message", this.safeHandler('METERING', this.parseMeteringSocketReply));
 			meteringSocket.on("error", (err) => {
-				self.log('warn', 'Metering socket (8751) notice: ' + err.message);
+				if (this.sockets.METERING !== meteringSocket) return;
+				if (port !== 0 && err.code === 'EADDRINUSE') {
+					self.log('info', `Metering port ${port} is in use (probably Dante Controller); using a free port instead`);
+					try { meteringSocket.close(); } catch (e) {}
+					openMeteringSocket(0);
+					return;
+				}
+				self.log('warn', 'Metering socket: ' + err.message);
 			});
 			meteringSocket.on("listening", () => {
 				const addr = meteringSocket.address();
-				self.log('info', `Metering socket listening on ${addr.address}:${addr.port}`);
+				self.meteringPort = addr.port;
+				self.log('info', `Metering listener on ${addr.address}:${addr.port}`);
 			});
-			if (boundIp) {
-				meteringSocket.bind(8751, boundIp);
-			} else {
-				meteringSocket.bind(8751);
-			}
-		} catch (err) {
-			self.log('warn', 'Metering socket creation error: ' + err.message);
-		}
+			meteringSocket.bind(port, boundIp || undefined);
+		};
+		openMeteringSocket(METERING_PORT);
 
 		self.setupInterval(); 
 		
@@ -682,8 +698,9 @@ module.exports = {
 
 // register dante device
 	registerDevice : function (deviceIp, deviceName) {
-		this.devicesData[deviceIp] = {name: deviceName, ports:{}};
+		this.devicesData[deviceIp] = {name: deviceName, ports:{}, lastSeen: Date.now()};
 		const currDevice = this.devicesData[deviceIp];
+		this.lastSeenByName[String(deviceName).toLowerCase()] = currDevice.lastSeen;
 		
 	// timeout function to destroy reference if device is offline too long
 		if ((this.timeout > 0) && !currDevice.timeoutArray) {
@@ -726,7 +743,12 @@ module.exports = {
 	
 // keep device from being considered offline
 	keepAlive: function (deviceIp) {
-		const toArray = this.devicesData[deviceIp]?.timeoutArray;
+		const device = this.devicesData[deviceIp];
+		if (device) {
+			device.lastSeen = Date.now();
+			if (device.name) this.lastSeenByName[String(device.name).toLowerCase()] = device.lastSeen;
+		}
+		const toArray = device?.timeoutArray;
 		if (toArray) {
 			clearTimeout(toArray[0]);
 			if (this.timeout > 0) {
@@ -832,6 +854,9 @@ module.exports = {
 //				console.log('DEVICE DATA : ', deviceData);
 //			}
 			
+			// Channel tables are polled regularly; only react when they actually change.
+			const channelSnapshot = (dir) => JSON.stringify(this.devicesData[deviceIp]?.[dir] ?? null);
+			const before = { rx: channelSnapshot('rx'), tx: channelSnapshot('tx') };
 			this.devicesData = merge(this.devicesData, deviceData);
 			// update Channels choices for actions, feedbacks & variables
 			
@@ -844,12 +869,9 @@ module.exports = {
 						this.checkVariables(deviceIp, 'sr', 'latency');
 						break;
 					case 'rx':
-						this.checkVariables(deviceIp, 'rx', 'rx_names');
-						this.updateChannelChoices(deviceIp, flag);
-						this.checkAllFeedbacks();
-						break;
 					case 'tx':
-						this.checkVariables(deviceIp, 'tx', 'tx_names');
+						if (channelSnapshot(flag) === before[flag]) break;
+						this.checkVariables(deviceIp, flag, flag + '_names');
 						this.updateChannelChoices(deviceIp, flag);
 						this.checkAllFeedbacks();
 						break;
@@ -887,6 +909,9 @@ module.exports = {
 			
 			// device is online
 			this.keepAlive(rinfo.address);
+			const device = this.devicesData[rinfo.address];
+			const mac = reply.slice(8, 14).toString('hex');
+			if (device && mac !== '000000000000') device.mac = mac;
         }
     },
 
@@ -914,6 +939,10 @@ module.exports = {
 			
 			// device is online
 			this.keepAlive(deviceIp);
+			const senderMac = reply.slice(8, 14).toString('hex');
+			if (this.devicesData[deviceIp] && senderMac !== '000000000000' && senderMac !== 'ffffffffffff') {
+				this.devicesData[deviceIp].mac = senderMac;
+			}
 			const payload = reply.slice(24);
                const commandId = bufferToInt(payload, 2);
                
@@ -1110,12 +1139,6 @@ module.exports = {
 					break;
 				}
 
-				case DANTE_CONST.COMMANDS.MESSAGE_TYPE_METERING_STATUS :
-				case DANTE_CONST.COMMANDS.MESSAGE_TYPE_METERING_CONTROL : {
-					this.parseMeteringBody(payload.slice(4), deviceIp);
-					break;
-				}
-					
 			}
 			
 			this.devicesData = merge(this.devicesData, deviceData);
@@ -1154,6 +1177,7 @@ module.exports = {
 			switch (commandId) {
 				case 0x1001 : {
 					currDevice.ports = {SETTINGS: bufferToInt(reply, 28)};
+					if (reply.length >= 18) currDevice.mac = reply.slice(12, 18).toString('hex');
 					
 					const deviceId = this.devicesData[deviceIp]?.name ?? deviceIp;
 					this.log('info', `Port for service SETTINGS of device ${deviceId} is : ${bufferToInt(reply, 28)}`);
@@ -1277,7 +1301,7 @@ module.exports = {
                 commandBuffer = this.makeCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_RX_CHANNEL_CONTROL, commandArguments);
             } else if (channelType === "tx") {
                 const commandArguments = Buffer.concat([
-                    Buffer.from("040100000", "hex"),
+                    Buffer.from("04010000", "hex"),
                     channelNumberBuffer,
                     Buffer.from("0024", "hex"),
                     Buffer.alloc(18),
@@ -1320,7 +1344,7 @@ module.exports = {
             let channelNumberBuffer = intToBuffer(parseInt(channelNumber, 10) || 0); 
 
             const commandArguments = Buffer.concat([
-                Buffer.from("040100000", "hex"),
+                Buffer.from("04010000", "hex"),
                 channelNumberBuffer,
                 Buffer.from("0024", "hex"),
                 Buffer.alloc(18),
@@ -1801,154 +1825,114 @@ module.exports = {
 		}
 	},
 
-	requestMetering(ipaddress) {
-		const commandArguments = Buffer.concat([
-			Buffer.from('00000064', 'hex'),
-			Buffer.alloc(8)
-		]);
-		const commandBuffer = this.makeSettingCommand(DANTE_CONST.COMMANDS.MESSAGE_TYPE_METERING_CONTROL, commandArguments);
-		this.sendCommand(commandBuffer, ipaddress, 'SETTINGS');
-	},
-
-	sendCmcSubscribe(ipaddress) {
-		const commandBuffer = Buffer.concat([
-			intToBuffer(0x1200, 2),
-			intToBuffer(26), // command size
-			this.counter,
-			intToBuffer(0x2000), // legacy subscribe opcode
-			intToBuffer(0x0001), // channel_type: 1 (METERING)
-			intToBuffer(0x0000),
-			intToBuffer(0x222f), // port 8751 (METERING_FIREWALL_PORT)
-			this.mac,
-			intToBuffer(0x0000)
-		]);
-		this.sendCommand(commandBuffer, ipaddress, 'CMC');
+	nextSequence() {
+		const seq = this.counter.readUInt16BE(0);
 		incrementBE(this.counter);
+		return seq;
 	},
 
+	// Ask a device to stream its meters to us. Metering feedbacks call this each time
+	// they render; streams are refreshed while wanted and stopped once unused.
 	subscribeMetering(deviceIp) {
 		if (!deviceIp) return;
 		this.meteringSubscriptions = this.meteringSubscriptions || {};
-		const isNew = !this.meteringSubscriptions[deviceIp];
-		this.meteringSubscriptions[deviceIp] = Date.now();
-		if (isNew) {
-			this.log('info', `Subscribing to metering for device: ${deviceIp}`);
-			this.requestMetering(deviceIp);
-			this.sendCmcSubscribe(deviceIp);
+		let sub = this.meteringSubscriptions[deviceIp];
+		if (!sub) {
+			sub = this.meteringSubscriptions[deviceIp] = { wantedAt: 0, sentAt: 0, deviceName: null };
 		}
+		sub.wantedAt = Date.now();
+		if (!sub.sentAt) this.sendMeteringRequest(deviceIp, sub);
+	},
+
+	sendMeteringRequest(deviceIp, sub) {
+		const device = this.devicesData[deviceIp];
+		if (!device?.name || !this.meteringPort || !this.boundIp || !this.isDeviceOnline(device)) return;
+		if (sub.deviceName && sub.deviceName !== device.name) this.sendMeteringStop(deviceIp, sub);
+		const packet = buildMeteringRequest(this.nextSequence(), {
+			deviceName: device.name,
+			subscriberIp: this.boundIp,
+			mac: this.mac,
+			port: this.meteringPort,
+		});
+		this.sendCommand(packet, deviceIp, 'CMC');
+		if (!sub.sentAt) this.log('info', `Subscribing to metering for ${device.name} (${deviceIp})`);
+		sub.sentAt = Date.now();
+		sub.deviceName = device.name;
+	},
+
+	sendMeteringStop(deviceIp, sub) {
+		if (!sub?.sentAt || !sub.deviceName || !this.meteringPort) return;
+		const packet = buildMeteringStop(this.nextSequence(), { deviceName: sub.deviceName, mac: this.mac, port: this.meteringPort });
+		this.sendCommand(packet, deviceIp, 'CMC');
+		sub.sentAt = 0;
 	},
 
 	unsubscribeMetering(deviceIp) {
-		if (!deviceIp || !this.meteringSubscriptions) return;
+		const sub = this.meteringSubscriptions?.[deviceIp];
+		if (!sub) return;
+		this.sendMeteringStop(deviceIp, sub);
 		delete this.meteringSubscriptions[deviceIp];
 	},
 
-	parseMeteringSocketReply(reply, rinfo) {
-		const deviceIp = rinfo.address;
-		this.keepAlive(deviceIp);
-
-		let body;
-		const audIdx = reply.indexOf('Audinate');
-		if (audIdx !== -1 && reply.length > audIdx + 8) {
-			body = reply.slice(audIdx + 8);
-		} else if (reply.length >= 24) {
-			body = reply.slice(24);
-		} else {
-			body = reply;
+	stopAllMetering() {
+		for (const ip of Object.keys(this.meteringSubscriptions || {})) {
+			this.unsubscribeMetering(ip);
 		}
-
-		this.parseMeteringBody(body, deviceIp);
 	},
 
-	parseMeteringBody(body, deviceIp) {
-		if (!body || body.length < 3 || !deviceIp) return;
-
-		let offset = 0;
-		if (body[0] === 1 || body[0] === 2 || body[0] === 3) {
-			offset = 0;
-		} else if (body.length >= 7 && (body[4] === 1 || body[4] === 2 || body[4] === 3)) {
-			offset = 4;
-		} else {
-			for (let i = 0; i < Math.min(body.length - 3, 32); i++) {
-				if ((body[i] === 1 || body[i] === 2 || body[i] === 3) && body[i + 1] <= 128 && body[i + 2] <= 128) {
-					offset = i;
-					break;
-				}
-			}
+	// Close sockets, giving queued sends (metering unsubscribes) a moment to leave.
+	closeSockets() {
+		if (!this.sockets) return;
+		if (this.sockets.CMC) this.stopAllMetering();
+		const old = this.sockets;
+		this.sockets = {};
+		for (const [name, socket] of Object.entries(old)) {
+			if (name === 'CMC') continue;
+			try { socket.close(); } catch (e) {}
 		}
-
-		const version = body[offset];
-		let numTx = 0;
-		let numRx = 0;
-		let dataStart = 0;
-
-		if (version < 3) {
-			numTx = body[offset + 1];
-			numRx = body[offset + 2];
-			dataStart = offset + 3;
-		} else if (version === 3) {
-			if (body.length < offset + 6) return;
-			numTx = (body[offset + 2] << 8) | body[offset + 3];
-			numRx = (body[offset + 4] << 8) | body[offset + 5];
-			dataStart = offset + 6;
+		if (old.CMC) {
+			setTimeout(() => {
+				try { old.CMC.close(); } catch (e) {}
+			}, 250);
 		}
+	},
 
-		if (body.length < dataStart + numTx + numRx) {
-			return;
-		}
+	parseMeteringSocketReply(reply, rinfo) {
+		const frame = parseMeteringFrame(reply);
+		const device = this.devicesData[rinfo.address];
+		if (!frame || !device) return;
+		this.keepAlive(rinfo.address);
+		if (!device.metering) device.metering = { tx: {}, rx: {} };
 
-		if (!this.devicesData[deviceIp]) {
-			this.devicesData[deviceIp] = {};
-		}
-		if (!this.devicesData[deviceIp].metering) {
-			this.devicesData[deviceIp].metering = { tx: {}, rx: {} };
-		}
-
-		const devM = this.devicesData[deviceIp].metering;
 		const now = Date.now();
-
-		for (let i = 0; i < numTx; i++) {
-			const chNum = i + 1;
-			const peak = body[dataStart + i];
-			const prev = devM.tx[chNum];
-			const prevHold = prev?.peakHold !== undefined ? prev.peakHold : 254;
-			const peakHold = peak < prevHold ? peak : prevHold;
-			devM.tx[chNum] = { peak, peakHold, updatedAt: now };
-		}
-
-		for (let j = 0; j < numRx; j++) {
-			const chNum = j + 1;
-			const peak = body[dataStart + numTx + j];
-			const prev = devM.rx[chNum];
-			const prevHold = prev?.peakHold !== undefined ? prev.peakHold : 254;
-			const peakHold = peak < prevHold ? peak : prevHold;
-			devM.rx[chNum] = { peak, peakHold, updatedAt: now };
-		}
-
+		const record = (direction, levels) => {
+			const meters = device.metering[direction];
+			levels.forEach((peak, i) => {
+				const prevHold = meters[i + 1]?.peakHold ?? 254;
+				meters[i + 1] = { peak, peakHold: Math.min(peak, prevHold), updatedAt: now };
+			});
+		};
+		record('tx', frame.tx);
+		record('rx', frame.rx);
 		this.meteringNeedsFeedbackCheck = true;
 	},
 
 	processMeteringTick() {
 		const now = Date.now();
-		// 1. Refresh active metering subscriptions if active within last 10 seconds
-		const activeIps = [];
-		for (const [ip, lastSeen] of Object.entries(this.meteringSubscriptions || {})) {
-			if (now - lastSeen < 10000) {
-				activeIps.push(ip);
-			} else {
-				delete this.meteringSubscriptions[ip];
-			}
-		}
+		this.meteringTickCounter = (this.meteringTickCounter || 0) + 1;
 
-		if (activeIps.length > 0) {
-			this.meteringTickCounter = (this.meteringTickCounter || 0) + 1;
-			// Send request every 200ms (every 2nd tick of 100ms)
-			if (this.meteringTickCounter % 2 === 0) {
-				for (const ip of activeIps) {
-					this.requestMetering(ip);
-					this.sendCmcSubscribe(ip);
+		// 1. Refresh wanted streams; stop ones no feedback has asked for recently.
+		if (this.meteringTickCounter % METERING_REFRESH_TICKS === 0) {
+			for (const [ip, sub] of Object.entries(this.meteringSubscriptions || {})) {
+				if (now - sub.wantedAt > METERING_IDLE_MS) {
+					this.unsubscribeMetering(ip);
+				} else {
+					this.sendMeteringRequest(ip, sub);
 				}
 			}
+			// Re-run meter feedbacks so they renew their interest (and re-subscribe
+			// to devices that have come back online).
+			this.meteringNeedsFeedbackCheck = true;
 		}
 
 		// 2. Slowly decay peak hold for active channels
@@ -1992,6 +1976,15 @@ module.exports = {
 	
 	
 	dante_discovery: function(response, rinfo) { 
+		// Address records in the same response tell us the device's real IP. Without
+		// one, the sender is assumed to be the device -- unless the sender is this
+		// computer, whose own mDNS responder can relay cached answers for others.
+		const addresses = {};
+		for (const type of ['answers', 'additionals']) {
+			for (const record of response[type] || []) {
+				if (record.type === 'A' && record.name) addresses[String(record.name).toLowerCase()] = record.data;
+			}
+		}
 		for (const type of ['answers', 'additionals']) {
 			response[type]?.forEach((answer) => {
 				const name = answer.name;
@@ -2011,7 +2004,9 @@ module.exports = {
 						const serviceName = name.slice(dotIndex + 1);
 
 						if (serviceName == danteService) { 
-							const deviceIp = rinfo.address;
+							const target = String(answer.data?.target || '').toLowerCase();
+							const deviceIp = addresses[target] || (this.localIps?.has(rinfo.address) ? null : rinfo.address);
+							if (!deviceIp) continue;
 							let currDevice = this.devicesData[deviceIp];
 							
 							if (currDevice) {
@@ -2061,10 +2056,15 @@ module.exports = {
 	
 		self.stopInterval();
 	
+		// Discovery every interval; device settings every 5th interval; versions
+		// (which rarely change) every 60th; clock status every 3rd. Devices also push
+		// change notifications, so this mainly catches anything missed.
 		if (self.config.interval > 0) {
 			self.INTERVAL = setInterval(() => {
+				self.pollTick = (self.pollTick || 0) + 1;
 				self.getMdnsServices();
-				self.refreshSettings();
+				if (self.pollTick % 5 === 1) self.refreshSettings(undefined, { versions: self.pollTick % 60 === 1 });
+				if (self.pollTick % 3 === 1) self.refreshClock();
 			}, self.config.interval);
 			self.log('info', 'Starting Update Interval: Every ' + self.config.interval + 'ms');
 		}
@@ -2076,6 +2076,15 @@ module.exports = {
 		self.METERING_INTERVAL = setInterval(() => {
 			self.processMeteringTick();
 		}, 100);
+
+		if (self.MONITOR_INTERVAL) clearInterval(self.MONITOR_INTERVAL);
+		self.MONITOR_INTERVAL = setInterval(() => {
+			try {
+				self.routeMonitorTick();
+			} catch (err) {
+				self.log('error', 'Route monitor: ' + (err?.message || err));
+			}
+		}, 1000);
 	},
 	
 	stopInterval: function() {
@@ -2091,9 +2100,14 @@ module.exports = {
 			clearInterval(self.METERING_INTERVAL);
 			self.METERING_INTERVAL = null;
 		}
+
+		if (self.MONITOR_INTERVAL) {
+			clearInterval(self.MONITOR_INTERVAL);
+			self.MONITOR_INTERVAL = null;
+		}
 	},
 	
-	refreshSettings: function(deviceIp) {
+	refreshSettings: function(deviceIp, { versions = true } = {}) {
 		const ipArray = deviceIp ? [deviceIp] : Object.keys(this.devicesData);
 		for (const ip of ipArray) {
 			if (!this.devicesData[ip]?.ports?.SETTINGS) continue;
@@ -2101,8 +2115,10 @@ module.exports = {
 			this.getPullup(ip);
 			this.getEncoding(ip);
 			this.getLevel(ip);
-			this.getVersion(ip);
-			this.getManfVersion(ip);
+			if (versions) {
+				this.getVersion(ip);
+				this.getManfVersion(ip);
+			}
 		}
 	},
 	
@@ -2164,11 +2180,14 @@ module.exports = {
 			}
 		}
 
-		// If no device directly flagged as master, check if devices report a common grandmasterUuid
+		// If no device directly flagged as master, find the device whose clock identity
+		// is the reported grandmaster. PTP identities are the device MAC followed by
+		// 0000, so this also works when the leader itself doesn't answer clock queries.
 		if (grandmasters.length === 0) {
 			for (const gm of Object.keys(gmUuids)) {
+				const gmMac = gm.slice(0, 12);
 				for (const [ip, dev] of Object.entries(this.devicesData)) {
-					if (dev.clock?.uuid && dev.clock.uuid === gm) {
+					if ((dev.clock?.uuid && dev.clock.uuid === gm) || dev.mac === gmMac) {
 						if (!grandmasters.includes(ip)) grandmasters.push(ip);
 					}
 				}
@@ -2258,6 +2277,112 @@ module.exports = {
 		this.checkFeedbacks('clock_master_status');
 	},
 	
+	// ---- Route monitoring ----------------------------------------------------
+
+	/** Name-indexed view of the network for route evaluation. */
+	routeNetwork() {
+		const now = Date.now();
+		const byName = new Map();
+		for (const [ip, dev] of Object.entries(this.devicesData)) {
+			if (dev?.name) byName.set(String(dev.name).toLowerCase(), { ...dev, ip, online: this.isDeviceOnline(dev, now) });
+		}
+		return {
+			getDevice: (name) => {
+				const key = String(name ?? '').trim().toLowerCase();
+				if (byName.has(key)) return byName.get(key);
+				// Seen before but since removed: known to be offline.
+				return this.lastSeenByName?.[key] ? { name, online: false } : null;
+			},
+			statusName: (code) => DANTE_CONST.SUBSCRIPTION_STATUS_NAMES[code],
+		};
+	},
+
+	/** Name of the transmitter currently feeding a monitored receive channel. */
+	routeSourceDeviceName(spec) {
+		const rxIp = this.findDeviceIpByName(spec.rx.device);
+		const source = this.devicesData[rxIp]?.rx?.[spec.rx.channel]?.sourceDevice;
+		if (source === '.') return spec.rx.device;
+		return source || spec.tx?.device || null;
+	},
+
+	/** Called from the route feedbacks: evaluate, track state, report transitions. */
+	evaluateRouteMonitor(feedbackId, options) {
+		const spec = specFromOptions(options);
+		if (!spec) {
+			this.removeRouteMonitor(feedbackId);
+			return null;
+		}
+		const result = this.routeMonitor.update(feedbackId, spec, this.routeNetwork());
+
+		if (spec.silence) {
+			for (const name of [spec.rx.device, this.routeSourceDeviceName(spec)]) {
+				const ip = name && this.findDeviceIpByName(name);
+				if (ip) this.subscribeMetering(ip);
+			}
+		}
+
+		if (result.changed) {
+			if (result.down) {
+				this.log('warn', `Route DOWN: ${result.label} -- ${result.reason}`);
+			} else {
+				this.log('info', `Route restored: ${result.label}`);
+			}
+			this.updateRouteMonitorVariables();
+			this.checkFeedbacks('route_monitor_any_down');
+		}
+		return result;
+	},
+
+	removeRouteMonitor(feedbackId) {
+		if (this.routeMonitor?.remove(feedbackId)) {
+			this.updateRouteMonitorVariables();
+			this.checkFeedbacks('route_monitor_any_down');
+		}
+	},
+
+	routeMonitorTick() {
+		if (!this.routeMonitor?.entries.size) return;
+		this.monitorTick = (this.monitorTick || 0) + 1;
+
+		// Keep monitored data fresh: receivers' subscription tables, and a cheap
+		// query to each transmitter so an offline one is noticed within seconds.
+		if (this.monitorTick % 2 === 0) {
+			const receivers = new Set();
+			const transmitters = new Set();
+			for (const entry of this.routeMonitor.entries.values()) {
+				receivers.add(entry.spec.rx.device.toLowerCase());
+				const source = this.routeSourceDeviceName(entry.spec);
+				if (source) transmitters.add(source.toLowerCase());
+			}
+			for (const [ip, dev] of Object.entries(this.devicesData)) {
+				const key = String(dev?.name || '').toLowerCase();
+				if (receivers.has(key)) this.getRxChannels(ip);
+				else if (transmitters.has(key)) this.getDeviceName(ip);
+			}
+		}
+
+		this.checkFeedbacks('route_monitor', 'route_monitor_status', 'route_monitor_any_down');
+		this.updateRouteMonitorVariables();
+	},
+
+	updateRouteMonitorVariables() {
+		const { total, down } = this.routeMonitor.summary();
+		const values = {
+			route_monitor_total: total,
+			route_monitor_down: down.length,
+			route_monitor_down_list: down.map((e) => `${e.label}: ${e.reason}`).join('; ') || 'None',
+			route_monitor_status: total === 0 ? 'No routes monitored' : down.length ? `${down.length} DOWN` : 'All OK',
+		};
+		const signature = JSON.stringify(values);
+		if (signature === this._routeMonitorVariables) return;
+		this._routeMonitorVariables = signature;
+		try {
+			this.setVariableValues(values);
+		} catch (err) {
+			this.log('debug', 'Route monitor variables: ' + (err?.message || err));
+		}
+	},
+
 	updateData: function (bytes) {
 		let self = this;
 		if (this._updateDataTimer) {
@@ -2266,7 +2391,7 @@ module.exports = {
 		this._updateDataTimer = setTimeout(() => {
 			this._updateDataTimer = null;
 			try {
-				saveCache({
+				saveCache(this.id, {
 					devicesChoices: this.devicesChoices,
 					txChannelsChoices: this.txChannelsChoices,
 					rxChannelsChoices: this.rxChannelsChoices,
